@@ -2,11 +2,16 @@ name: News bot
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # каждые 30 минут (GitHub может запускать с задержкой)
+    - cron: "*/15 * * * *"    # афиши: каждые 15 минут (GitHub иногда запускает с задержкой)
+    - cron: "7 1 * * 1"       # сезонный обзор: понедельник ~10:07 по Корее
   workflow_dispatch:          # кнопка "Run workflow" для ручного запуска
+    inputs:
+      mode:
+        description: "events — афиши, seasonal — сезонный обзор"
+        default: "events"
 
 permissions:
-  contents: write             # чтобы сохранять seen.json (список уже выложенных новостей)
+  contents: write             # чтобы сохранять seen.json (что уже обработано)
 
 concurrency:
   group: news-bot
@@ -15,7 +20,7 @@ concurrency:
 jobs:
   post:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -28,11 +33,9 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHANNEL: "@k_afiisha"
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}   # необязательно, платно
-          AI_PROVIDERS: gemini        # для ChatGPT: "openai,gemini"
-          RUN_ONCE: "1"
-          PYTHONUNBUFFERED: "1"       # показывать журнал сразу, а не в конце
-          PAUSE_BETWEEN_POSTS: "120"
+          MODE: ${{ github.event.schedule == '7 1 * * 1' && 'seasonal' || inputs.mode || 'events' }}
+          PYTHONUNBUFFERED: "1"
+          PAUSE_BETWEEN_POSTS: "60"
         run: python news_bot.py
 
       - name: Save seen.json
@@ -41,4 +44,4 @@ jobs:
           git config user.name "news-bot"
           git config user.email "news-bot@users.noreply.github.com"
           git add seen.json || true
-          git diff --cached --quiet || (git commit -m "update seen" && git push)
+          git diff --cached --quiet || (git commit -m "update seen" && git pull --rebase -q && git push)
