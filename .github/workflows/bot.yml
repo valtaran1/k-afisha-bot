@@ -33,6 +33,7 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHANNEL: "@k_afiisha"
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          KAKAO_REST_KEY: ${{ secrets.KAKAO_REST_KEY }}   # поиск точного адреса площадки (Kakao Map)
           MODE: ${{ github.event.schedule == '7 1 * * 1' && 'seasonal' || inputs.mode || 'events' }}
           PYTHONUNBUFFERED: "1"
           PAUSE_BETWEEN_POSTS: "60"
