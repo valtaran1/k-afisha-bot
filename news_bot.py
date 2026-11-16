@@ -30,6 +30,8 @@ from datetime import datetime, timedelta, timezone
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 CHANNEL = os.environ.get("CHANNEL", "@k_afiisha")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+# Kakao Local API (бесплатно): по названию площадки находит точный адрес, как Kakao Map
+KAKAO_REST_KEY = os.environ.get("KAKAO_REST_KEY", "")
 GEMINI_MODELS = os.environ.get("GEMINI_MODELS",
                                "gemini-flash-latest,gemini-flash-lite-latest,gemma-3-27b-it")
 GEMINI_TIMEOUT = 60
@@ -476,16 +478,56 @@ def venue_from_text(text):
     return squash(m.group(1)) if m else None
 
 
-def navigator_target(it, text, ai_venue):
+SIDO_RU = {"Сеул": "서울", "Пусан": "부산", "Инчхон": "인천", "Тэгу": "대구", "Тэджон": "대전",
+           "Кванджу": "광주", "Ульсан": "울산", "Сечжон": "세종", "Кёнгидо": "경기", "Гоян": "경기",
+           "Сувон": "경기", "Сонам": "경기", "Пхаджу": "경기", "Канвондо": "강원", "Чеджу": "제주"}
+
+
+def _norm(t):
+    return re.sub(r"[\W_]+", "", (t or "").lower())
+
+
+def kakao_lookup(venue, region_hint=None):
+    """Ищем площадку в Kakao Map и берём её дорожный адрес — но только если совпадение однозначное:
+    название места на карте совпадает с названием из афиши (или полностью входит в него), и у всех
+    таких совпадений один и тот же адрес. Иначе None."""
+    if not (KAKAO_REST_KEY and venue):
+        return None
+    url = ("https://dapi.kakao.com/v2/local/search/keyword.json?size=15&query="
+           + urllib.parse.quote(venue))
+    try:
+        raw, _, _ = http(url, timeout=15, headers={"Authorization": f"KakaoAK {KAKAO_REST_KEY}"})
+        docs = json.loads(raw.decode()).get("documents", [])
+    except Exception as e:
+        log("  Kakao: поиск не удался:", str(e)[:120])
+        return None
+    nv = _norm(venue)
+    exact = [d for d in docs if _norm(d.get("place_name")) == nv]
+    part = [d for d in docs if len(_norm(d.get("place_name"))) >= 4 and _norm(d.get("place_name")) in nv]
+    cands = exact or part
+    if region_hint:
+        cands = [d for d in cands if (d.get("road_address_name") or d.get("address_name", "")).startswith(region_hint)]
+    addrs = {(d.get("road_address_name") or d.get("address_name") or "").strip() for d in cands}
+    addrs.discard("")
+    if len(addrs) == 1:
+        a = addrs.pop()
+        log(f"  Kakao: «{venue}» → {a} ({len(cands)} совп.)")
+        return a
+    log(f"  Kakao: «{venue}» — однозначного совпадения нет (вариантов адреса: {len(addrs)})")
+    return None
+
+
+def navigator_target(it, text, ai_venue, region_hint=None):
     """Возвращает (что_вставлять_в_навигатор, это_адрес?) или (None, False)."""
     place = it.get("place_ko")
     if place:                                     # выставочные центры: место из официального списка
         for pattern, addr in CENTER_ADDRESSES:
             if re.search(pattern, place):
                 return addr, True
-        return place, False
+        addr = kakao_lookup(place, region_hint)
+        return (addr, True) if addr else (place, False)
     venue = squash(ai_venue) if ai_venue and verbatim(ai_venue, text) else venue_from_text(text)
-    addr = find_address(text, venue)
+    addr = find_address(text, venue) or kakao_lookup(venue, region_hint)
     if addr:
         return addr, True
     if venue:
@@ -494,14 +536,16 @@ def navigator_target(it, text, ai_venue):
 
 
 def navigator_message(target, is_address):
-    code = f"<code>{html.escape(target)}</code>"
+    """Отдельное сообщение — ТОЛЬКО адрес (или название места), чтобы скопировать его целиком."""
+    return f"<code>{html.escape(target)}</code>"
+
+
+def navigator_hint(is_address):
+    """Пояснение для основного поста."""
     if is_address:
-        return ("🧭 <b>Адрес для навигатора</b>\n"
-                "Нажмите на адрес ниже — он скопируется. Вставьте его в Naver Map, Kakao Map или T map 👇\n\n"
-                + code)
-    return ("🧭 <b>Место для навигатора</b>\n"
-            "Точного адреса в официальной афише нет, поэтому даём название места как в оригинале. "
-            "Нажмите на него — оно скопируется. Вставьте в поиск Naver Map или Kakao Map 👇\n\n" + code)
+        return "🧭 Адрес для навигатора — в следующем сообщении 👇 (нажмите, чтобы скопировать)"
+    return ("🧭 Точного адреса в афише нет — в следующем сообщении название места 👇 "
+            "(нажмите, чтобы скопировать, и найдите в Naver/Kakao Map)")
 
 
 # ---------- ИИ ----------
@@ -614,7 +658,7 @@ STYLE = """Ты — главный редактор русскоязычного
 категория (#концерт #kpop #фанмитинг #мюзикл #классика #диджей #выставка #автошоу #мотошоу
 #авиашоу #технологии #мода #бьюти #мастеркласс #фестиваль #маркет #бесплатно #горнолыжка
 #аквапарк #сезонное #новоеместо и т.п.). Хэштеги без пробелов и дефисов.
-Разметка: только <b> и <i>. Длина поста без хэштегов — до 750 символов. Ссылку в текст
+Разметка: только <b> и <i>; перенос строки — обычный перевод строки, НЕ <br>. Длина поста без хэштегов — до 750 символов. Ссылку в текст
 НЕ вставляй, её добавит бот.
 Не выдумывай ничего, чего нет в материалах (и в результатах поиска, если он есть).
 
@@ -628,7 +672,8 @@ ANSWER_FORMAT = ('Ответь строго одним JSON-объектом б�
                  '"event_key": "латиницей: название-город-ГГГГММДД первой даты", '
                  '"link_index": номер ссылки из списка, "post": "текст поста", '
                  '"venue_ko": "место проведения на корейском ДОСЛОВНО как в материалах (скопируй, не переводи '
-                 'и не дополняй); если в материалах нет — пустая строка"}')
+                 'и не дополняй); если в материалах нет — пустая строка", '
+                 '"city_ru": "город по-русски, если он точно известен из материалов (Сеул, Пусан, Гоян…), иначе пусто"}')
 
 
 def parse_json(text):
@@ -663,7 +708,11 @@ ALLOWED_TAG = re.compile(r"</?(b|i)>|<a href=\"[^\"<>]+\">|</a>")
 
 
 def sanitize(text):
-    """Экранирует всё, кроме разрешённых тегов, чтобы Telegram не отклонил пост."""
+    """Переносы <br> → новая строка; прочие HTML-теги убираем; остальное экранируем."""
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?i)</?p\s*>", "\n", text)
+    text = re.sub(r"</?(?!(?:b|i)>)(?!a\s+href=)(?!/a>)[a-zA-Z][^>]*>", "", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
     out, pos = [], 0
     for m in ALLOWED_TAG.finditer(text):
         out.append(html.escape(html.unescape(text[pos:m.start()]), quote=False))
@@ -714,10 +763,7 @@ def publish(text, photo, nav=None):
         mid = tg("sendMessage", {"chat_id": CHANNEL, "text": text, "parse_mode": "HTML",
                                  "disable_web_page_preview": "true"})
     if nav:
-        fields = {"chat_id": CHANNEL, "text": nav, "parse_mode": "HTML"}
-        if mid:
-            fields["reply_to_message_id"] = mid
-        tg("sendMessage", fields)
+        tg("sendMessage", {"chat_id": CHANNEL, "text": nav, "parse_mode": "HTML"})
     return mid
 
 
@@ -897,7 +943,8 @@ def run_events(st):
         if not link:
             log("  нет официальной ссылки на билеты — пропуск")
             continue
-        target, is_addr = navigator_target(it, text, data.get("venue_ko", ""))
+        target, is_addr = navigator_target(it, text, data.get("venue_ko", ""),
+                                           SIDO_RU.get(str(data.get("city_ru", "")).strip()))
         if not target:
             log("  место проведения не подтверждено официальным источником — пропуск")
             continue
@@ -907,7 +954,7 @@ def run_events(st):
         if not tags.strip().startswith("#"):
             body, tags = post, ""
         label = "Официальная страница" if it["kind"] == "expo" else "Билеты и подробности"
-        post = (f"{body.rstrip()}\n🧭 {'Адрес' if is_addr else 'Место'} для навигатора — в сообщении ниже 👇"
+        post = (f"{body.rstrip()}\n\n{navigator_hint(is_addr)}"
                 f"\n\n🔗 <a href=\"{html.escape(link, quote=True)}\">{label}</a>"
                 + (f"\n\n{tags.strip()}" if tags.strip() else ""))
         if it["kind"] in ("news", "seasonal"):
@@ -976,11 +1023,14 @@ def run_seasonal(st):
         post += "\n\n" + "\n".join(f"🔗 <a href=\"{html.escape(u, quote=True)}\">"
                                    f"{html.escape(urllib.parse.urlparse(u).netloc)}</a>" for u in links)
     names = [squash(n) for n in data.get("places_ko", []) if isinstance(n, str) and squash(n)][:6]
-    nav = None
     if names:
-        nav = ("🧭 <b>Места для навигатора</b>\nНажмите на название — оно скопируется. Вставьте в поиск "
-               "Naver Map или Kakao Map 👇\n\n" + "\n".join(f"<code>{html.escape(n)}</code>" for n in names))
-    publish(post, None, nav)
+        post += ("\n\n🧭 Названия мест для навигатора — следующими сообщениями 👇 Нажмите, чтобы скопировать, "
+                 "и вставьте в поиск Naver Map или Kakao Map.")
+    publish(post, None)
+    for n in names:
+        addr = kakao_lookup(n)
+        tg("sendMessage", {"chat_id": CHANNEL, "text": navigator_message(addr or n, bool(addr)),
+                           "parse_mode": "HTML"})
     st["seasonal_last"] = week
     save_state(st)
     log("✅ сезонный обзор опубликован")
