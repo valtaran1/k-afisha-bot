@@ -263,9 +263,12 @@ def src_coex():
                                                        f"{t + timedelta(days=120):%Y.%m.%d}"))
         page = get_text(url)
         found = 0
-        for m in re.finditer(r'href="(https://www\.coex\.co\.kr/exhibitions/[^"?]+)[^"]*"\s+'
-                             r'class="BlogEventItem-link">(.*?)</a>', page, re.S):
-            link, chunk = m.group(1), m.group(2)
+        for m in re.finditer(r"<a\s([^>]*BlogEventItem-link[^>]*)>(.*?)</a>", page, re.S):
+            href = re.search(r"""href=["']?(https?://www\.coex\.co\.kr/exhibitions/[^"'?\s>]+)""",
+                             m.group(1))
+            if not href:
+                continue
+            link, chunk = href.group(1), m.group(2)
             title = re.search(r'BlogEventItemCont-tit">(.*?)</h4>', chunk, re.S)
             cate = re.search(r'BlogEventItemCont-cate[^"]*">(.*?)</p>', chunk, re.S)
             date = re.search(r'BlogEventItemCont-date">(.*?)</div>', chunk, re.S)
@@ -289,16 +292,16 @@ def src_coex():
 def src_bexco():
     page = get_text("https://www.bexco.co.kr/kor/CMS/EventScheduleMgr/list.do?mCode=MN214")
     items, seen = [], set()
-    for m in re.finditer(r'href="/kor/CMS/EventScheduleMgr/view\.do\?mCode=MN214(?:&amp;)+event_seq=(\d+)"'
-                         r'(.*?)</a>', page, re.S):
+    for m in re.finditer(r"""href=["']?[^"'>]*EventScheduleMgr/view\.do\?[^"'>]*?event_seq=(\d+)[^>]*>"""
+                         r"(.*?)</a>", page, re.S):
         seq, chunk = m.group(1), m.group(2)
         if seq in seen:
             continue
         seen.add(seq)
-        title = re.search(r'class="subject">(.*?)</span>', chunk, re.S)
-        kind = re.search(r'class="eventIcon[^"]*">(.*?)</span>', chunk, re.S)
-        date = re.search(r'class="date">(.*?)</span>', chunk, re.S)
-        img = re.search(r'<img src="([^"]+)"', chunk)
+        title = re.search(r"""class=["']subject["']>(.*?)</span>""", chunk, re.S)
+        kind = re.search(r"""class=["']eventIcon[^"']*["']>(.*?)</span>""", chunk, re.S)
+        date = re.search(r"""class=["']date["']>(.*?)</span>""", chunk, re.S)
+        img = re.search(r"""<img[^>]+src=["']([^"']+)["']""", chunk)
         if not title:
             continue
         title = strip_tags(title.group(1))
@@ -664,12 +667,38 @@ def norm_title(t):
 
 
 # ---------- основной проход ----------
+DIAG_URLS = {"COEX": "https://www.coex.co.kr/event/full-schedules/",
+             "BEXCO": "https://www.bexco.co.kr/kor/CMS/EventScheduleMgr/list.do?mCode=MN214",
+             "KINTEX": "https://www.kintex.com/web/ko/event/list.do"}
+
+
+def diagnose(name):
+    """Если источник ничего не вернул — пишем в журнал, что пришло вместо страницы."""
+    url = DIAG_URLS.get(name)
+    if not url:
+        return
+    try:
+        raw, cs, final = http(url, timeout=20)
+        page = decode(raw, cs)
+        title = re.search(r"(?is)<title>(.*?)</title>", page)
+        sample = re.findall(r"<a\s[^>]{0,160}", page)
+        sample = [a for a in sample if re.search(r"exhibitions/|event_seq|fnView", a)][:2]
+        log(f"  диагностика {name}: {len(raw)} байт, адрес {final}, заголовок "
+            f"«{strip_tags(title.group(1))[:60] if title else '-'}», ссылки: {sample}")
+    except urllib.error.HTTPError as e:
+        log(f"  диагностика {name}: HTTP {e.code}")
+    except Exception as e:
+        log(f"  диагностика {name}: {e}")
+
+
 def collect(st):
     items = []
     for name, fn in SOURCES:
         try:
             got = fn()
             log(f"Источник {name}: {len(got)}")
+            if not got and name != "Google News":
+                diagnose(name)
             items += got
         except Exception as e:
             log(f"Источник {name} недоступен: {e}")
