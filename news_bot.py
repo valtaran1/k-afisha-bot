@@ -251,11 +251,18 @@ def ask_gemini(prompt):
             continue
         url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
                f"{model}:generateContent?key={GEMINI_API_KEY}")
+        payload = {"contents": [{"parts": [{"text": prompt}]}],
+                   "generationConfig": {"responseMimeType": "application/json",
+                                        "temperature": 0.5}}
         try:
-            res = post_json(url, {
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"responseMimeType": "application/json",
-                                     "temperature": 0.5}}, {}, timeout=GEMINI_TIMEOUT)
+            try:
+                res = post_json(url, payload, {}, timeout=GEMINI_TIMEOUT)
+            except urllib.error.HTTPError as e:
+                if e.code < 500:
+                    raise
+                log(f"  {model}: перегружен (HTTP {e.code}), повтор через 10 сек")
+                time.sleep(10)   # временная перегрузка у Google — пробуем ещё раз
+                res = post_json(url, payload, {}, timeout=GEMINI_TIMEOUT)
             log(f"  написал пост: {model}")
             return "".join(p.get("text", "")
                            for p in res["candidates"][0]["content"]["parts"])
