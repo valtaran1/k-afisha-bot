@@ -40,6 +40,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 # запросов в день), когда её лимит кончится — следующая.
 GEMINI_MODELS = os.environ.get("GEMINI_MODELS",
                                "gemini-flash-latest,gemini-flash-lite-latest")
+GEMINI_TIMEOUT = 90   # сек; если модель думает дольше — переходим к следующей
 
 # ChatGPT (ПЛАТНО, необязательно): чтобы включить, добавьте "openai" в AI_PROVIDERS
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
@@ -52,14 +53,16 @@ OLLAMA_MODEL = "qwen2.5:7b"   # слабый ПК: qwen2.5:3b, мощный (16+
 # Генерировать картинку, если на сайте её нет (бесплатно, Pollinations)
 GENERATE_IMAGES = True
 
-# RSS-ленты корейских сайтов (замените на нужные вам)
+# RSS-ленты корейских сайтов: культура и развлечения — там анонсы событий
 FEEDS = [
-    "https://www.yna.co.kr/rss/news.xml",          # Yonhap
-    "https://www.hani.co.kr/rss/",                 # Hankyoreh
+    "https://www.yna.co.kr/rss/culture.xml",        # Yonhap: культура
+    "https://www.yna.co.kr/rss/entertainment.xml",  # Yonhap: развлечения, K-pop
+    "https://www.hani.co.kr/rss/culture/",          # Hankyoreh: культура
 ]
 
 CHECK_EVERY_MIN = 30      # как часто проверять сайты
 MAX_POSTS_PER_RUN = 2     # сколько постов максимум за одну проверку
+MAX_CHECKS_PER_RUN = 8    # сколько статей максимум отдавать ИИ за проверку (бережём бесплатный лимит)
 PAUSE_BETWEEN_POSTS = int(os.environ.get("PAUSE_BETWEEN_POSTS", "600"))  # пауза между постами, сек
 
 # Режим "один проход": проверить сайты, выложить новое и выйти (для GitHub Actions)
@@ -110,19 +113,42 @@ STYLE = f"""Ты — главный редактор русскоязычног�
 - не выдумывай фактов, цифр, дат и цитат, которых нет в статье;
 - перед ответом перечитай пост глазами носителя русского языка и исправь всё, что
   звучит как перевод.
-Если статья — реклама, пустая или неинтересна русскоязычному читателю, верни post = "SKIP"."""
+ФИЛЬТР — канал публикует ТОЛЬКО анонсы и новости о мероприятиях в Корее, которые
+читатель может посетить или в которых может поучаствовать: концерты, фанмитинги,
+выставки, фестивали, спектакли и мюзиклы, кинопоказы, поп-ап сторы, ярмарки и маркеты,
+спортивные матчи, праздники и городские события, туры K-pop артистов по Корее, открытие
+сезонных мест (каток, цветение, иллюминация) и т.п.
+Политика, экономика, криминал, происшествия, светские сплетни, рецензии без даты
+события, реклама — НЕ публикуем: верни post = "SKIP"."""
 # =========================================================
 
 UA = {"User-Agent": "Mozilla/5.0 (compatible; NewsBot/1.0)"}
 
 
 # ---------- сеть ----------
-def http_get(url, timeout=30):
+def log(*args):
+    print(time.strftime("%H:%M:%S"), *args, flush=True)
+
+
+def http_get(url, timeout=30, max_bytes=8_000_000):
+    """Скачивает страницу с ЖЁСТКИМ лимитом общего времени,
+    чтобы медленный сайт не подвешивал бота."""
+    deadline = time.time() + timeout
     req = urllib.request.Request(url, headers=UA)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        raw = r.read()
+    with urllib.request.urlopen(req, timeout=min(timeout, 20)) as r:
         charset = r.headers.get_content_charset()
-    return raw, charset
+        chunks, size = [], 0
+        while True:
+            if time.time() > deadline:
+                raise TimeoutError(f"слишком долго: {url}")
+            chunk = r.read(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > max_bytes:
+                break
+    return b"".join(chunks), charset
 
 
 def decode(raw, charset):
@@ -219,7 +245,7 @@ _exhausted_models = set()   # модели, у которых сегодня к�
 def ask_gemini(prompt):
     if not GEMINI_API_KEY:
         raise RuntimeError("не указан GEMINI_API_KEY")
-    last_error = None
+    errors = []
     for model in [m.strip() for m in GEMINI_MODELS.split(",") if m.strip()]:
         if model in _exhausted_models:
             continue
@@ -229,17 +255,23 @@ def ask_gemini(prompt):
             res = post_json(url, {
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {"responseMimeType": "application/json",
-                                     "temperature": 0.5}}, {})
-            print(f"  перевёл: {model}")
+                                     "temperature": 0.5}}, {}, timeout=GEMINI_TIMEOUT)
+            log(f"  написал пост: {model}")
             return "".join(p.get("text", "")
                            for p in res["candidates"][0]["content"]["parts"])
         except urllib.error.HTTPError as e:
-            last_error = e
-            if e.code in (429, 404):  # лимит исчерпан или модель недоступна
+            errors.append(f"{model}: HTTP {e.code}")
+            if e.code in (429, 404):      # лимит исчерпан / модель недоступна
                 _exhausted_models.add(model)
-                continue
-            raise
-    raise last_error or RuntimeError("все модели Gemini исчерпали лимит")
+            elif e.code >= 500:           # перегрузка у Google — модель пропускаем в этом запуске
+                _exhausted_models.add(model)
+            else:
+                raise
+        except Exception as e:            # таймаут, обрыв связи
+            errors.append(f"{model}: {e}")
+            _exhausted_models.add(model)
+        log(f"  {errors[-1]} — пробую следующую модель")
+    raise RuntimeError("; ".join(errors) or "все модели Gemini недоступны")
 
 
 def ask_openai(prompt):
@@ -303,10 +335,10 @@ def generate_image(prompt):
     url = ("https://image.pollinations.ai/prompt/"
            + urllib.parse.quote(prompt[:300]) + "?width=768&height=512")
     try:
-        data, _ = http_get(url, timeout=180)
+        data, _ = http_get(url, timeout=90)
         return data if len(data) > 5000 else None
     except Exception as e:
-        print("  картинку сгенерировать не удалось:", e)
+        log("  картинку сгенерировать не удалось:", e)
         return None
     finally:
         _last_image_time = time.time()
@@ -341,7 +373,7 @@ def publish(text, image_bytes):
                "photo", image_bytes)
             return
         except Exception as e:
-            print("  Фото не отправилось, публикую текстом:", e)
+            log("  Фото не отправилось, публикую текстом:", e)
     tg("sendMessage", {"chat_id": CHANNEL, "text": text, "parse_mode": "HTML",
                        "disable_web_page_preview": "true"})
 
@@ -367,32 +399,47 @@ def first_run(seen):
             for it in read_feed(feed)[3:]:
                 seen.add(it["link"])
         except Exception as e:
-            print("Лента недоступна:", feed, e)
+            log("Лента недоступна:", feed, e)
     save_seen(seen)
 
 
 def run_once(seen):
     new = []
     for feed in FEEDS:
+        log("Читаю ленту:", feed)
         try:
             new += [it for it in read_feed(feed) if it["link"] not in seen]
         except Exception as e:
-            print("Лента недоступна:", feed, e)
+            log("Лента недоступна:", feed, e)
+    log("Новых статей:", len(new))
 
-    posted = 0
+    posted = checked = 0
     for it in new:
-        if posted >= MAX_POSTS_PER_RUN:
+        if posted >= MAX_POSTS_PER_RUN or checked >= MAX_CHECKS_PER_RUN:
             break
-        seen.add(it["link"])
-        save_seen(seen)
+        log("Обрабатываю:", it["title"])
         try:
-            print("Обрабатываю:", it["title"])
             text, image_url = fetch_article(it["link"])
-            post, image_prompt = make_post(it["title"], text)
-            if post.upper().startswith("SKIP"):
-                print("  пропущено ИИ")
-                continue
+            log("  статья скачана, символов:", len(text))
+        except Exception as e:
+            log("  статью скачать не удалось:", e)
+            seen.add(it["link"]); save_seen(seen)
+            continue
 
+        checked += 1
+        try:
+            post, image_prompt = make_post(it["title"], text)
+        except Exception as e:
+            # ИИ сейчас недоступен — статью НЕ помечаем, попробуем в следующий раз
+            log("  ИИ недоступен, остановка до следующего запуска:", e)
+            break
+
+        seen.add(it["link"]); save_seen(seen)
+        if post.upper().startswith("SKIP"):
+            log("  не событие — пропущено")
+            continue
+
+        try:
             image = None
             if image_url:
                 try:
@@ -404,13 +451,16 @@ def run_once(seen):
 
             link = html.escape(it["link"], quote=True)
             post += f'\n\n<a href="{link}">Источник</a>'
+            log("  картинка:", "есть" if image else "нет")
+            if posted > 0:  # пауза только между постами
+                log(f"  пауза {PAUSE_BETWEEN_POSTS} сек перед следующим постом")
+                time.sleep(PAUSE_BETWEEN_POSTS)
             publish(post, image)
             posted += 1
-            print("  опубликовано")
-            if posted < MAX_POSTS_PER_RUN:
-                time.sleep(PAUSE_BETWEEN_POSTS)
+            log("  опубликовано")
         except Exception as e:
-            print("  ошибка:", e)
+            log("  ошибка публикации:", e)
+    log(f"Готово: опубликовано {posted}, проверено ИИ {checked}")
 
 
 def main():
@@ -420,7 +470,7 @@ def main():
     if RUN_ONCE:
         run_once(seen)
         return
-    print("Бот запущен.")
+    log("Бот запущен.")
     while True:
         run_once(seen)
         time.sleep(CHECK_EVERY_MIN * 60)
