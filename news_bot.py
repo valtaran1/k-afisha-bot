@@ -42,7 +42,7 @@ MAX_CHECKS_PER_RUN = 5       # сколько событий отдавать И
 HOT_SCORE = 75               # с какой оценки событие может быть «горячим» (много просмотров анонса и т.п.)
 PAUSE_BETWEEN_POSTS = int(os.environ.get("PAUSE_BETWEEN_POSTS", "60"))
 EXPO_DAYS_AHEAD = 45         # выставки публикуем, когда до начала ≤ 45 дней
-GENERATE_IMAGES = True       # если у события нет картинки — сгенерировать (Pollinations)
+GENERATE_IMAGES = False      # картинки только с официальных афиш; генерацию не используем
 STATE_FILE = "seen.json"
 
 # Поиск новостей: (запрос, приоритет). Сезонные добавляются по месяцу ниже.
@@ -75,6 +75,8 @@ TRUSTED_LINK_DOMAINS = ["ticket.melon.com", "ticket.yes24.com", "tickets.interpa
                         "nol.yanolja.com", "ticketlink.co.kr", "kintex.com", "coex.co.kr",
                         "bexco.co.kr", "go.kr", "or.kr", "ticket.11st.co.kr",
                         "booking.naver.com", "m.booking.naver.com"]
+TICKET_DOMAINS = ["ticket.melon.com", "ticket.yes24.com", "tickets.interpark.com", "nol.yanolja.com",
+                  "ticketlink.co.kr"]
 # Домены СМИ, блогов и соцсетей — это не «официальная ссылка на билеты»
 NOT_OFFICIAL = (r"news|daum\.net|naver\.com$|blog|tistory|youtube|youtu\.be|wikipedia|namu\.wiki|"
                 r"chosun|joongang|donga|hani\.co|yna\.co|yonhap|kbs|mbc|sbs|jtbc|mk\.co|hankyung|"
@@ -251,6 +253,9 @@ def src_kintex():
         it = _expo_item("kintex", "KINTEX (Гоян)", seq, title,
                         f"https://www.kintex.com/web/ko/event/view.do?seq={seq}", html.unescape(alt.group(2)))
         it["image"] = urllib.parse.urljoin("https://www.kintex.com/", html.unescape(alt.group(1)))
+        lines = [l.strip() for l in strip_tags(chunk).split("\n") if l.strip()]
+        hall = next((l for l in lines if re.match(r"^(전시홀|제\d\s*전시장|그랜드볼룸|회의실|컨벤션|이벤트홀|야외)", l)), "")
+        it["place_ko"] = ("킨텍스 " + hall).strip()
         items.append(it)
     return items
 
@@ -283,6 +288,8 @@ def src_coex():
             it = _expo_item("coex", "COEX (Сеул)", slug[-80:], title, link + "/",
                             strip_tags(date.group(1)) if date else "")
             it["image"] = img.group(1) if img else None
+            hall = re.search(r"""BlogEventItemCont-hall["']>(.*?)</div>""", chunk, re.S)
+            it["place_ko"] = ("코엑스 " + strip_tags(hall.group(1))).strip() if hall else "코엑스"
             items.append(it)
             found += 1
         if not found:
@@ -313,6 +320,9 @@ def src_bexco():
                         strip_tags(date.group(1)) if date else "")
         if img and "noimg" not in img.group(1):
             it["image"] = urllib.parse.urljoin("https://www.bexco.co.kr/", img.group(1))
+        place = re.search(r"""class=["']place["']>(.*?)</span>""", chunk, re.S)
+        place = re.sub(r"\s+", " ", strip_tags(place.group(1))) if place else ""
+        it["place_ko"] = place if place.startswith("누리마루") else ("벡스코 " + place).strip()
         items.append(it)
     return items
 
@@ -392,7 +402,7 @@ def fetch_details(it):
                         data={"bId": it["yes24_id"], "genre": "", "province": "", "order": "1"},
                         headers={"Referer": "https://ticket.yes24.com/New/Notice/NoticeMain.aspx",
                                  "X-Requested-With": "XMLHttpRequest"})
-        img = re.search(r'<img[^>]+src="([^"]+\.(?:jpg|jpeg|png|gif)[^"]*)"', page, re.I)
+        img = re.search(r"""<img[^>]+src=["']([^"']+\.(?:jpg|jpeg|png|gif)[^"']*)["']""", page, re.I)
         img = urllib.parse.urljoin("https://ticket.yes24.com/", img.group(1)) if img else None
         perf = re.search(r'(https?://ticket\.yes24\.com/Perf/\d+)', page)
         links = [perf.group(1)] if perf else []
@@ -415,6 +425,83 @@ def fetch_details(it):
     if it["kind"] in ("ticket", "expo"):
         return text[:7000], img, [it["url"]]
     return text[:7000], img, [u for u, _ in candidate_links(page, url)]
+
+
+# ---------- адрес для навигатора ----------
+# Адреса выставочных центров — дословно из подвала их официальных сайтов (проверено 16.11.2026).
+# Применяются ТОЛЬКО к залам, которые точно находятся по этому адресу.
+CENTER_ADDRESSES = [
+    (r"^코엑스(?!.*마곡)", "서울특별시 강남구 영동대로 513"),
+    (r"^벡스코\s*(제1전시장|컨벤션홀|오디토리움|전관)", "부산광역시 해운대구 APEC로 55"),
+]
+SIDO = (r"(?:서울특별시|부산광역시|대구광역시|인천광역시|광주광역시|대전광역시|울산광역시|"
+        r"세종특별자치시|경기도|강원특별자치도|강원도|충청북도|충청남도|전북특별자치도|전라북도|"
+        r"전라남도|경상북도|경상남도|제주특별자치도|서울|부산|대구|인천|광주|대전|울산|세종|경기|"
+        r"강원|충북|충남|전북|전남|경북|경남|제주)")
+ROAD_ADDR = re.compile(SIDO + r"\s+[가-힣]+(?:시|군|구)(?:\s+[가-힣]+(?:구|군))?(?:\s+[가-힣0-9]+(?:읍|면))?"
+                       r"\s+[가-힣0-9A-Za-z]+(?:로|길)(?:\s*\d+[가-힣]*(?:로|길))?\s*\d+(?:-\d+)?")
+
+
+def squash(t):
+    return re.sub(r"\s+", " ", t or "").strip()
+
+
+def verbatim(fragment, text):
+    """Фрагмент засчитывается, только если он дословно есть в официальном тексте."""
+    f = squash(fragment)
+    return bool(f) and f in squash(text)
+
+
+def find_address(text, venue):
+    """Адрес берём, только если он стоит СРАЗУ после названия площадки или метки «장소/공연장소»
+    (в пределах 80 символов) и рядом нет признаков адреса компании/организатора.
+    Если таких адресов нет или они разные — None (тогда даём название места)."""
+    t = squash(text)
+    anchors = [m.end() for m in re.finditer(r"공연\s*장소|행사\s*장소|장\s*소\s*[:：]|공연장\s*주소|공연장\s*위치", t)]
+    if venue and len(venue) >= 2:
+        anchors += [m.end() for m in re.finditer(re.escape(venue), t)]
+    found = set()
+    for a in anchors:
+        window = t[a:a + 80]
+        for m in ROAD_ADDR.finditer(window):
+            before = window[:m.start()]
+            if re.search(r"본사|사업자|사업장|고객센터|대표|통신판매|회사|주최|주관|기획사|문의", before):
+                continue
+            found.add(m.group(0).strip())
+    return found.pop() if len(found) == 1 else None
+
+
+def venue_from_text(text):
+    m = re.search(r"(?:공연\s*장소|공연장|장\s*소|행사\s*장소)\s*[:：]\s*([^\n/|·]{2,60})", text)
+    return squash(m.group(1)) if m else None
+
+
+def navigator_target(it, text, ai_venue):
+    """Возвращает (что_вставлять_в_навигатор, это_адрес?) или (None, False)."""
+    place = it.get("place_ko")
+    if place:                                     # выставочные центры: место из официального списка
+        for pattern, addr in CENTER_ADDRESSES:
+            if re.search(pattern, place):
+                return addr, True
+        return place, False
+    venue = squash(ai_venue) if ai_venue and verbatim(ai_venue, text) else venue_from_text(text)
+    addr = find_address(text, venue)
+    if addr:
+        return addr, True
+    if venue:
+        return venue, False
+    return None, False
+
+
+def navigator_message(target, is_address):
+    code = f"<code>{html.escape(target)}</code>"
+    if is_address:
+        return ("🧭 <b>Адрес для навигатора</b>\n"
+                "Нажмите на адрес ниже — он скопируется. Вставьте его в Naver Map, Kakao Map или T map 👇\n\n"
+                + code)
+    return ("🧭 <b>Место для навигатора</b>\n"
+            "Точного адреса в официальной афише нет, поэтому даём название места как в оригинале. "
+            "Нажмите на него — оно скопируется. Вставьте в поиск Naver Map или Kakao Map 👇\n\n" + code)
 
 
 # ---------- ИИ ----------
@@ -511,8 +598,15 @@ STYLE = """Ты — главный редактор русскоязычного
 живо, без канцелярита. Корейские имена — по Концевичу, устоявшиеся формы как в русских СМИ
 (Сеул, Пусан, Самсунг). Названия K-pop групп — как пишут фанаты (BTS, THE BOYZ), при первом
 упоминании можно оригинал в скобках. Корейские реалии кратко поясняй.
-Структура: 1) <b>Заголовок</b> с одним эмодзи; 2) 1–3 коротких предложения о событии и почему
-стоит сходить; 3) блок фактов строками 📅 🕐 📍 💰 🎟 (только то, что известно);
+Название события (концерта, тура, выставки) переводи на русский и СРАЗУ дублируй оригиналом
+в скобках, как в афише: «Снова, сегодня» (다시, 오늘); «Новогодний концерт-кроссовер»
+(서초문화원 송년음악회 [크로스오버 콘서트]).
+Если выступает артист или группа — 1–2 предложения о них: кто это, жанр, чем известны. Бери из
+материалов; об известных артистах можно общеизвестное, но без цифр, дат и имён, в которых не уверен.
+Структура: 1) <b>Заголовок</b> с одним эмодзи; 2) кто выступает / что за событие и почему стоит
+сходить (2–4 коротких предложения); 3) блок фактов строками 📅 🕐 📍 💰 🎟 (только то, что
+известно). В строке 📍 — место по-русски и в скобках корейское название как в афише. Адрес НЕ пиши —
+бот отправит его отдельным сообщением;
 4) последней строкой 3–6 хэштегов: город (#Сеул #Пусан #Инчхон #Тэгу #Тэджон #Кванджу #Ульсан
 #Сувон #Гоян #Сонам #Чеджу …), провинция (#Кёнгидо #Канвондо #Чхунчхон #Кёнсан #Чолла #ЧеджуДо) —
 провинцию ставь ТОЛЬКО если город в ней находится; Сеул, Пусан, Инчхон, Тэгу, Тэджон, Кванджу, Ульсан —
@@ -533,7 +627,8 @@ ANSWER_FORMAT = ('Ответь строго одним JSON-объектом б�
                  '"reason": "кратко почему skip", "priority": "hot" или "normal", '
                  '"event_key": "латиницей: название-город-ГГГГММДД первой даты", '
                  '"link_index": номер ссылки из списка, "post": "текст поста", '
-                 '"image_prompt": "описание иллюстрации на английском без текста и реальных людей"}')
+                 '"venue_ko": "место проведения на корейском ДОСЛОВНО как в материалах (скопируй, не переводи '
+                 'и не дополняй); если в материалах нет — пустая строка"}')
 
 
 def parse_json(text):
@@ -599,13 +694,15 @@ def tg(method, fields, photo=None):
         res = json.loads(e.read().decode() or "{}")
     if not res.get("ok"):
         raise RuntimeError(res)
+    return res.get("result", {}).get("message_id")
 
 
-def publish(text, photo):
+def publish(text, photo, nav=None):
+    """Пост (с официальной афишей, если есть) + отдельное сообщение с адресом для навигатора."""
+    mid = None
     if photo and len(text) <= 1024:
         try:
-            tg("sendPhoto", {"chat_id": CHANNEL, "caption": text, "parse_mode": "HTML"}, photo)
-            return
+            mid = tg("sendPhoto", {"chat_id": CHANNEL, "caption": text, "parse_mode": "HTML"}, photo)
         except Exception as e:
             log("  фото с подписью не ушло:", str(e)[:200])
     elif photo:
@@ -613,8 +710,15 @@ def publish(text, photo):
             tg("sendPhoto", {"chat_id": CHANNEL}, photo)
         except Exception as e:
             log("  фото не ушло:", str(e)[:200])
-    tg("sendMessage", {"chat_id": CHANNEL, "text": text, "parse_mode": "HTML",
-                       "disable_web_page_preview": "true"})
+    if mid is None:
+        mid = tg("sendMessage", {"chat_id": CHANNEL, "text": text, "parse_mode": "HTML",
+                                 "disable_web_page_preview": "true"})
+    if nav:
+        fields = {"chat_id": CHANNEL, "text": nav, "parse_mode": "HTML"}
+        if mid:
+            fields["reply_to_message_id"] = mid
+        tg("sendMessage", fields)
+    return mid
 
 
 _last_gen = 0
@@ -793,18 +897,31 @@ def run_events(st):
         if not link:
             log("  нет официальной ссылки на билеты — пропуск")
             continue
+        target, is_addr = navigator_target(it, text, data.get("venue_ko", ""))
+        if not target:
+            log("  место проведения не подтверждено официальным источником — пропуск")
+            continue
+        log(f"  навигатор: {'адрес' if is_addr else 'название места'} «{target}»")
         post = sanitize(str(data.get("post", "")).strip())
         body, _, tags = post.rpartition("\n")
         if not tags.strip().startswith("#"):
             body, tags = post, ""
         label = "Официальная страница" if it["kind"] == "expo" else "Билеты и подробности"
-        post = (f"{body.rstrip()}\n\n🔗 <a href=\"{html.escape(link, quote=True)}\">{label}</a>"
+        post = (f"{body.rstrip()}\n🧭 {'Адрес' if is_addr else 'Место'} для навигатора — в сообщении ниже 👇"
+                f"\n\n🔗 <a href=\"{html.escape(link, quote=True)}\">{label}</a>"
                 + (f"\n\n{tags.strip()}" if tags.strip() else ""))
-        photo = get_image(img_url, data.get("image_prompt", ""))
+        if it["kind"] in ("news", "seasonal"):
+            img_url = None                       # фото из СМИ не берём — только официальная афиша
+            if any(urllib.parse.urlparse(link).netloc.lower().endswith(d) for d in TICKET_DOMAINS):
+                try:
+                    img_url = og_image(get_text(link, timeout=20), link)
+                except Exception:
+                    img_url = None
+        photo = get_image(img_url, None)
         if posted + hot > 0:
             time.sleep(PAUSE_BETWEEN_POSTS)
         try:
-            publish(post, photo)
+            publish(post, photo, navigator_message(target, is_addr))
         except Exception as e:
             log("  ошибка публикации:", str(e)[:300])
             continue
@@ -839,7 +956,8 @@ def run_seasonal(st):
               "С помощью поиска Google найди АКТУАЛЬНУЮ информацию на эту неделю: 3–6 мест, по каждому "
               "строка: название (город/провинция) — статус/дата открытия — цена — акция. Укажи только то, "
               "что подтверждено официальными или свежими источниками. Пост до 950 символов, в конце "
-              "хэштеги. Официальные ссылки мест верни в \"extra_links\". " + ANSWER_FORMAT)
+              "хэштеги. Официальные ссылки мест верни в \"extra_links\", корейские названия мест (как на их "
+              "официальных сайтах) — в \"places_ko\": [\"...\"]. " + ANSWER_FORMAT)
     try:
         out, sources = gemini(prompt, search=True)
     except Exception as e:
@@ -857,7 +975,12 @@ def run_seasonal(st):
     if links:
         post += "\n\n" + "\n".join(f"🔗 <a href=\"{html.escape(u, quote=True)}\">"
                                    f"{html.escape(urllib.parse.urlparse(u).netloc)}</a>" for u in links)
-    publish(post, get_image(None, data.get("image_prompt", "")))
+    names = [squash(n) for n in data.get("places_ko", []) if isinstance(n, str) and squash(n)][:6]
+    nav = None
+    if names:
+        nav = ("🧭 <b>Места для навигатора</b>\nНажмите на название — оно скопируется. Вставьте в поиск "
+               "Naver Map или Kakao Map 👇\n\n" + "\n".join(f"<code>{html.escape(n)}</code>" for n in names))
+    publish(post, None, nav)
     st["seasonal_last"] = week
     save_state(st)
     log("✅ сезонный обзор опубликован")
