@@ -31,6 +31,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}   # необязательно, платно
           AI_PROVIDERS: gemini        # для ChatGPT: "openai,gemini"
           RUN_ONCE: "1"
+          PYTHONUNBUFFERED: "1"       # показывать журнал сразу, а не в конце
           PAUSE_BETWEEN_POSTS: "120"
         run: python news_bot.py
 
