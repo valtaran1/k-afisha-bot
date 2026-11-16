@@ -263,22 +263,22 @@ def src_coex():
                                                        f"{t + timedelta(days=120):%Y.%m.%d}"))
         page = get_text(url)
         found = 0
-        for m in re.finditer(r"<a\s([^>]*BlogEventItem-link[^>]*)>(.*?)</a>", page, re.S):
-            href = re.search(r"""href=["']?(https?://www\.coex\.co\.kr/exhibitions/[^"'?\s>]+)""",
-                             m.group(1))
-            if not href:
-                continue
-            link, chunk = href.group(1), m.group(2)
-            title = re.search(r'BlogEventItemCont-tit">(.*?)</h4>', chunk, re.S)
-            cate = re.search(r'BlogEventItemCont-cate[^"]*">(.*?)</p>', chunk, re.S)
-            date = re.search(r'BlogEventItemCont-date">(.*?)</div>', chunk, re.S)
-            img = re.search(r'<img src="([^"]+)"', chunk)
+        for m in re.finditer(r"""<a\s[^>]*href=["']?(https?://www\.coex\.co\.kr/exhibitions/[^"'?\s>]+)"""
+                             r"[^>]*>(.*?)</a>", page, re.S):
+            link, chunk = m.group(1), m.group(2)
+            title = re.search(r"""<h4[^>]*>(.*?)</h4>""", chunk, re.S)
+            cate = re.search(r"""BlogEventItemCont-cate[^"']*["']>(.*?)</p>""", chunk, re.S)
+            date = re.search(r"""BlogEventItemCont-date["']>(.*?)</div>""", chunk, re.S) or \
+                re.search(r"(20\d\d\.\d\d\.\d\d\s*-\s*20\d\d\.\d\d\.\d\d)", chunk)
+            img = re.search(r"""<img[^>]+src=["']([^"']+)["']""", chunk)
             if not title:
                 continue
             title = strip_tags(title.group(1))
             if cate and strip_tags(cate.group(1)) == "Convention":
                 title += " [конференция]"
             slug = link.rstrip("/").rsplit("/", 1)[-1]
+            if any(i["key"] == f"coex:{slug[-80:]}" for i in items):
+                continue
             it = _expo_item("coex", "COEX (Сеул)", slug[-80:], title, link + "/",
                             strip_tags(date.group(1)) if date else "")
             it["image"] = img.group(1) if img else None
