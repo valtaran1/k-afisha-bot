@@ -31,7 +31,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 CHANNEL = os.environ.get("CHANNEL", "@k_afiisha")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODELS = os.environ.get("GEMINI_MODELS",
-                               "gemini-flash-latest,gemini-flash-lite-latest")
+                               "gemini-flash-latest,gemini-flash-lite-latest,gemma-3-27b-it")
 GEMINI_TIMEOUT = 60
 USE_GOOGLE_SEARCH = True     # уточнять детали через поиск Google внутри Gemini (если доступно)
 
@@ -430,12 +430,13 @@ def gemini(prompt, search=False):
     for model in [m.strip() for m in GEMINI_MODELS.split(",") if m.strip()]:
         if model in _bad_models:
             continue
-        use_search = search and _search_ok
+        is_gemma = model.startswith("gemma")      # Gemma: без поиска и без JSON-режима
+        use_search = search and _search_ok and not is_gemma
         payload = {"contents": [{"parts": [{"text": prompt}]}],
                    "generationConfig": {"temperature": 0.4}}
         if use_search:
             payload["tools"] = [{"google_search": {}}]
-        else:
+        elif not is_gemma:
             payload["generationConfig"]["responseMimeType"] = "application/json"
         url = (f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
                f"?key={GEMINI_API_KEY}")
@@ -450,7 +451,7 @@ def gemini(prompt, search=False):
                 return text, sources
             except urllib.error.HTTPError as e:
                 msg = e.read().decode(errors="ignore")[:300]
-                if use_search and e.code in (400, 403, 429) and attempt == 1:
+                if use_search and e.code in (400, 403) and attempt == 1:
                     log(f"  поиск Google в Gemini недоступен (HTTP {e.code}) — продолжаю без него")
                     _search_ok = use_search = False
                     payload.pop("tools", None)
