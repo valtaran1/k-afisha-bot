@@ -39,6 +39,7 @@ MODE = os.environ.get("MODE", "events")      # events | seasonal
 MAX_POSTS_PER_RUN = 2        # обычных постов за запуск
 MAX_HOT_POSTS_PER_RUN = 4    # популярных (публикуются сверх обычного лимита)
 MAX_CHECKS_PER_RUN = 5       # сколько событий отдавать ИИ за запуск (бережём бесплатный лимит)
+HOT_SCORE = 75               # с какой оценки событие может быть «горячим» (много просмотров анонса и т.п.)
 PAUSE_BETWEEN_POSTS = int(os.environ.get("PAUSE_BETWEEN_POSTS", "60"))
 EXPO_DAYS_AHEAD = 45         # выставки публикуем, когда до начала ≤ 45 дней
 GENERATE_IMAGES = True       # если у события нет картинки — сгенерировать (Pollinations)
@@ -741,6 +742,8 @@ def run_events(st):
     for it in queue:
         if checked >= MAX_CHECKS_PER_RUN or (posted >= MAX_POSTS_PER_RUN and hot >= MAX_HOT_POSTS_PER_RUN):
             break
+        if posted >= MAX_POSTS_PER_RUN and it["score"] < HOT_SCORE:
+            break       # обычные посты на этот запуск набраны; дальше только кандидаты в «горячие»
         log(f"▶ [{it['source']}] {it['title']}  (оценка {it['score']:.0f})")
         try:
             text, img_url, links = fetch_details(it)
