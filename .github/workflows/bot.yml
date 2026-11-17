@@ -23,6 +23,8 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main             # всегда свежий seen.json (иначе запуск из очереди берёт старый и повторяет посты)
 
       - uses: actions/setup-python@v5
         with:
