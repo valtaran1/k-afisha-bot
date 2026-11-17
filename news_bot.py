@@ -523,6 +523,31 @@ def kakao_lookup(venue, region_hint=None):
     return None
 
 
+CITIES_KO = set("""서울 부산 대구 인천 광주 대전 울산 세종 경기 강원 충북 충남 전북 전남 경북 경남 제주
+수원 성남 고양 용인 부천 안산 안양 남양주 화성 평택 의정부 시흥 파주 김포 광명 군포 하남 오산 이천 안성
+의왕 양주 포천 여주 동두천 과천 가평 양평 연천 춘천 원주 강릉 동해 태백 속초 삼척 홍천 횡성 영월 평창
+정선 철원 화천 양구 인제 고성 양양 청주 충주 제천 보은 옥천 영동 증평 진천 괴산 음성 단양 천안 공주
+보령 아산 서산 논산 계룡 당진 금산 부여 서천 청양 홍성 예산 태안 전주 군산 익산 정읍 남원 김제 완주
+진안 무주 장수 임실 순창 고창 부안 목포 여수 순천 나주 광양 담양 곡성 구례 고흥 보성 화순 장흥 강진
+해남 영암 무안 함평 영광 장성 완도 진도 신안 포항 경주 김천 안동 구미 영주 영천 상주 문경 경산 의성
+청송 영양 영덕 청도 고령 성주 칠곡 예천 울진 울릉 창원 진주 통영 사천 김해 밀양 거제 양산 의령 함안
+창녕 남해 하동 산청 함양 거창 합천 서귀포 강남 강북 강서 강동 종로 중구 마포 용산 송파 서초 해운대
+일대 일원 전역 전국 각지 시내 곳곳 등 및 지역 도심""".split())
+
+
+def vague_place(v):
+    """True, если «место» — это только город/район/провинция («경북 포항», «포항시 일대»):
+    по такому названию в навигаторе место проведения не найти."""
+    words = re.findall(r"[가-힣A-Za-z0-9]+", v or "")
+    if not words:
+        return True
+    for w in words:
+        base = re.sub(r"(특별자치시|특별자치도|특별시|광역시|시|군|구|도|읍|면)$", "", w)
+        if w not in CITIES_KO and base not in CITIES_KO and not re.fullmatch(SIDO, w):
+            return False
+    return True
+
+
 def navigator_target(it, text, ai_venue, region_hint=None):
     """Возвращает (что_вставлять_в_навигатор, это_адрес?) или (None, False)."""
     place = it.get("place_ko")
@@ -532,7 +557,12 @@ def navigator_target(it, text, ai_venue, region_hint=None):
                 return addr, True
         addr = kakao_lookup(place, region_hint)
         return (addr, True) if addr else (place, False)
-    venue = squash(ai_venue) if ai_venue and verbatim(ai_venue, text) else venue_from_text(text)
+    venue = squash(ai_venue) if ai_venue and verbatim(ai_venue, text) else None
+    if not venue or vague_place(venue):
+        venue = venue_from_text(text)
+    if venue and vague_place(venue):
+        log(f"  место «{venue}» — это только город/район, точной площадки нет")
+        return None, False
     addr = find_address(text, venue) or kakao_lookup(venue, region_hint)
     if addr:
         return addr, True
@@ -766,8 +796,9 @@ ANSWER_FORMAT = ('Ответь строго одним JSON-объектом б�
                  '"end_date": "ГГГГ-ММ-ДД — ПОСЛЕДНИЙ день проведения (для однодневного — его дата; '
                  'для сезонного места — последний день сезона, если известен), иначе пусто", '
                  '"link_index": номер ссылки из списка, "post": "текст поста", '
-                 '"venue_ko": "место проведения на корейском ДОСЛОВНО как в материалах (скопируй, не переводи '
-                 'и не дополняй); если в материалах нет — пустая строка", '
+                 '"venue_ko": "КОНКРЕТНАЯ площадка на корейском ДОСЛОВНО как в материалах (зал, парк, пляж, '
+                 'стадион — скопируй, не переводи и не дополняй); если в материалах указан только город или '
+                 'район без конкретного места — пустая строка", '
                  '"city_ru": "город по-русски, если он точно известен из материалов (Сеул, Пусан, Гоян…), иначе пусто"}')
 
 
