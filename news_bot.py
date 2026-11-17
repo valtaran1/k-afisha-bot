@@ -44,6 +44,8 @@ MAX_CHECKS_PER_RUN = 5       # сколько событий отдавать И
 HOT_SCORE = 75               # с какой оценки событие может быть «горячим» (много просмотров анонса и т.п.)
 PAUSE_BETWEEN_POSTS = int(os.environ.get("PAUSE_BETWEEN_POSTS", "60"))
 EXPO_DAYS_AHEAD = 45         # выставки публикуем, когда до начала ≤ 45 дней
+MARK_FINISHED_AFTER_DAYS = 1 # через сколько дней после последнего дня события пометить пост «завершилось»
+FINISHED_MARK = "❌ <b>Мероприятие завершилось</b>"
 GENERATE_IMAGES = False      # картинки только с официальных афиш; генерацию не используем
 STATE_FILE = "seen.json"
 
@@ -686,6 +688,8 @@ K-pop группы и солисты с международным фандом�
 ANSWER_FORMAT = ('Ответь строго одним JSON-объектом без пояснений: {"skip": true/false, '
                  '"reason": "кратко почему skip", "priority": "hot" или "normal", '
                  '"event_key": "латиницей: название-город-ГГГГММДД первой даты", '
+                 '"end_date": "ГГГГ-ММ-ДД — ПОСЛЕДНИЙ день проведения (для однодневного — его дата; '
+                 'для сезонного места — последний день сезона, если известен), иначе пусто", '
                  '"link_index": номер ссылки из списка, "post": "текст поста", '
                  '"venue_ko": "место проведения на корейском ДОСЛОВНО как в материалах (скопируй, не переводи '
                  'и не дополняй); если в материалах нет — пустая строка", '
@@ -763,13 +767,17 @@ def tg(method, fields, photo=None):
 
 
 def publish(text, photo, nav=None):
-    """Пост (с официальной афишей, если есть) + отдельное сообщение с адресом для навигатора."""
+    """Пост (с официальной афишей, если есть) + отдельное сообщение с адресом для навигатора.
+    Возвращает (номер сообщения с текстом, это подпись к фото?, итоговый текст)."""
     mid = None
+    is_caption = False
     if not nav and nav is not False:
         text = text + "\n\n" + SEPARATOR   # адреса нет — черта в конце самого поста
-    if photo and len(text) <= 1024:
+    # запас 40 символов — чтобы потом влезла пометка «Мероприятие завершилось» (лимит подписи 1024)
+    if photo and len(text) <= 1024 - 40:
         try:
             mid = tg("sendPhoto", {"chat_id": CHANNEL, "caption": text, "parse_mode": "HTML"}, photo)
+            is_caption = True
         except Exception as e:
             log("  фото с подписью не ушло:", str(e)[:200])
     elif photo:
@@ -782,7 +790,32 @@ def publish(text, photo, nav=None):
                                  "disable_web_page_preview": "true"})
     if nav:
         tg("sendMessage", {"chat_id": CHANNEL, "text": nav, "parse_mode": "HTML"})
-    return mid
+    return mid, is_caption, text
+
+
+def mark_finished(st):
+    """Дописывает «❌ Мероприятие завершилось» в начало постов о прошедших событиях."""
+    today = now_kst().date()
+    for mid, p in list(st["posted"].items()):
+        try:
+            end = datetime.strptime(p["end"], "%Y-%m-%d").date()
+        except (KeyError, ValueError):
+            st["posted"].pop(mid, None)
+            continue
+        if today < end + timedelta(days=MARK_FINISHED_AFTER_DAYS):
+            continue
+        new_text = f"{FINISHED_MARK}\n\n{p['text']}"
+        try:
+            if p.get("caption"):
+                tg("editMessageCaption", {"chat_id": CHANNEL, "message_id": mid,
+                                          "caption": new_text, "parse_mode": "HTML"})
+            else:
+                tg("editMessageText", {"chat_id": CHANNEL, "message_id": mid, "text": new_text,
+                                       "parse_mode": "HTML", "disable_web_page_preview": "true"})
+            log(f"Пост {mid} помечен как завершившийся (событие закончилось {p['end']})")
+        except Exception as e:
+            log(f"Пост {mid} не удалось пометить:", str(e)[:200])
+        st["posted"].pop(mid, None)       # пробуем один раз, чтобы не повторять ошибку каждый запуск
 
 
 _last_gen = 0
@@ -815,7 +848,7 @@ def get_image(url, prompt):
 
 # ---------- состояние ----------
 def load_state():
-    st = {"done": {}, "events": {}, "seasonal_last": ""}
+    st = {"done": {}, "events": {}, "seasonal_last": "", "posted": {}}
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, encoding="utf-8") as f:
             data = json.load(f)
@@ -986,10 +1019,13 @@ def run_events(st):
         if posted + hot > 0:
             time.sleep(PAUSE_BETWEEN_POSTS)
         try:
-            publish(post, photo, navigator_message(target, is_addr))
+            mid, is_caption, sent_text = publish(post, photo, navigator_message(target, is_addr))
         except Exception as e:
             log("  ошибка публикации:", str(e)[:300])
             continue
+        end_date = str(data.get("end_date", "")).strip()
+        if mid and re.fullmatch(r"\d{4}-\d{2}-\d{2}", end_date):
+            st["posted"][str(mid)] = {"end": end_date, "caption": is_caption, "text": sent_text}
         if is_hot:
             hot += 1
         else:
@@ -1061,6 +1097,10 @@ def main():
     if MODE == "seasonal":
         run_seasonal(st)
     else:
+        try:
+            mark_finished(st)
+        except Exception as e:
+            log("Пометка завершившихся не удалась:", str(e)[:200])
         run_events(st)
     save_state(st)
 
