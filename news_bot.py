@@ -991,7 +991,8 @@ def tg(method, fields, photo=None):
         res = json.loads(e.read().decode() or "{}")
     if not res.get("ok"):
         raise RuntimeError(res)
-    return res.get("result", {}).get("message_id")
+    result = res.get("result")
+    return result.get("message_id") if isinstance(result, dict) else result
 
 
 def publish(text, photo, nav=None):
