@@ -1592,8 +1592,39 @@ def date_label(ev):
         return f"{s.day} {MONTHS[s.month]} – {e.day} {MONTHS[e.month]} {e.year}"
     if s or e:
         x = s or e
-        return f"{x.day} {MONTHS[x.month]} {x.year}"
+        return ("" if s else "до ") + f"{x.day} {MONTHS[x.month]} {x.year}"
     return ""
+
+
+CITY_TAGS = set(SIDO_RU) | {"Пхохан", "Кёнджу", "Чонджу", "Чхонан", "Чханвон", "Андон", "Канныдо", "Каннын",
+                             "Сокчхо", "Пхёнчхан", "Ёсу", "Мокпхо", "Ульджин", "Кимхэ", "Пхаджу", "Инчхон"}
+
+
+def site_repair(events):
+    """Старым записям (перенесённым из Telegram) один раз ищем афишу и город."""
+    changed = False
+    for ev in events:
+        if not ev.get("city"):
+            tag = next((t for t in re.findall(r"#(\w+)", strip_tags(ev.get("text", ""))) if t in CITY_TAGS), "")
+            if tag:
+                ev["city"] = tag
+                changed = True
+        if ev.get("img") or ev.get("img_try") or not link_ok(ev.get("link", "")):
+            continue
+        ev["img_try"] = True
+        changed = True
+        link = ev["link"]
+        try:
+            m = re.search(r"ticket\.yes24\.com/New/Notice/NoticeMain\.aspx#id=(\d+)", link)
+            if m:
+                _, ev["img"], _ = fetch_details({"source": "YES24 Ticket", "yes24_id": m.group(1),
+                                                 "url": link, "kind": "ticket"})
+            else:
+                ev["img"] = poster_image(get_text(link, timeout=20), link) or ""
+        except Exception as e:
+            log(f"  сайт: афиша для {ev.get('mid')} не найдена:", str(e)[:120])
+        ev["img"] = ev.get("img") or ""
+    return changed
 
 
 def post_body_html(text):
@@ -1686,11 +1717,19 @@ def event_page(ev, today):
 def build_site(st):
     site_backfill(st)
     events = [ev for ev in site_load() if ev.get("mid")]
+    if site_repair(events):
+        site_save(events)
+    events = [ev for ev in events if link_ok(ev.get("link", ""))]   # без официальной ссылки — не показываем
     if not events:
         return
     today = now_kst().date()
+    keep = set()
     for ev in events:
+        keep.add(f"{ev['mid']}.html")
         write_if_changed(os.path.join(SITE_DIR, "e", f"{ev['mid']}.html"), event_page(ev, today))
+    for name in os.listdir(os.path.join(SITE_DIR, "e")):
+        if name.endswith(".html") and name not in keep:
+            os.remove(os.path.join(SITE_DIR, "e", name))     # страница события, которое убрали с сайта
 
     def key(ev):
         return (_d(ev.get("start")) or _d(ev.get("end")) or today, str(ev.get("mid")))
