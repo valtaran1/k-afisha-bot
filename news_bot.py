@@ -85,7 +85,10 @@ TICKET_DOMAINS = ["ticket.melon.com", "ticket.yes24.com", "tickets.interpark.com
 # Домены СМИ, блогов и соцсетей — это не «официальная ссылка на билеты»
 NOT_OFFICIAL = (r"news|daum\.net|naver\.com$|blog|tistory|youtube|youtu\.be|wikipedia|namu\.wiki|"
                 r"chosun|joongang|donga|hani\.co|yna\.co|yonhap|kbs|mbc|sbs|jtbc|mk\.co|hankyung|"
-                r"edaily|newsis|news1|heraldcorp|koreaherald|koreatimes|ytn|vertexaisearch|google\.")
+                r"edaily|newsis|news1|heraldcorp|koreaherald|koreatimes|ytn|vertexaisearch|google\.|"
+                r"stnsports|sports\.|sportsseoul|sportalkorea|osen|xportsnews|tenasia|dispatch|insight\.co|"
+                r"wikitree|isplus|ilgan|mydaily|spotv|tvreport|munhwa|segye|kmib|hankookilbo|nocutnews|"
+                r"asiae|inews24|ajunews|sedaily|fnnews|instagram|facebook|twitter|threads|x\.com$")
 # =========================================================
 
 KST = timezone(timedelta(hours=9))
@@ -796,6 +799,22 @@ def make_post(it, text, links):
     return data, extra
 
 
+def link_ok(u, it=None):
+    """Официальная ссылка на конкретное событие: не СМИ/блог/соцсеть и не просто главная страница."""
+    p = urllib.parse.urlparse(u or "")
+    dom = p.netloc.lower()
+    if not dom or p.scheme not in ("http", "https"):
+        return False
+    if not p.path.strip("/") and not p.query and not p.fragment:
+        return False                     # главная страница сайта — не ссылка на событие
+    if any(dom.endswith(d) for d in TRUSTED_LINK_DOMAINS):
+        return True
+    if re.search(NOT_OFFICIAL, dom) or re.search(r"articleView|/news/|/article", u, re.I):
+        return False
+    art = urllib.parse.urlparse((it or {}).get("article_url", "")).netloc.lower()
+    return not (art and dom == art)       # сама новостная статья — не официальная ссылка
+
+
 # ---------- защита от повторов ----------
 def recent_block(st):
     """Список недавно опубликованных событий — чтобы ИИ узнал то же событие с другого сайта."""
@@ -1133,8 +1152,10 @@ def run_events(st):
         link = None
         try:
             idx = int(data.get("link_index"))
-            if 0 <= idx < len(links):
+            if 0 <= idx < len(links) and link_ok(links[idx], it):
                 link = links[idx]
+            elif 0 <= idx < len(links):
+                log(f"  ссылка от ИИ не официальная ({links[idx][:80]}) — ищу другую")
         except (TypeError, ValueError):
             pass
         if not link:
@@ -1142,12 +1163,9 @@ def run_events(st):
             ranked = sorted(extra, key=lambda u: not any(
                 urllib.parse.urlparse(u).netloc.lower().endswith(d) for d in TRUSTED_LINK_DOMAINS))
             for u in ranked:
-                dom = urllib.parse.urlparse(u).netloc.lower()
-                trusted = any(dom.endswith(d) for d in TRUSTED_LINK_DOMAINS)
-                if not dom or (not trusted and re.search(NOT_OFFICIAL, dom)):
-                    continue
-                link = u
-                break
+                if link_ok(u, it):
+                    link = u
+                    break
         if not link:
             log("  нет официальной ссылки на билеты — пропуск")
             continue
@@ -1157,14 +1175,7 @@ def run_events(st):
             log("  место проведения не подтверждено официальным источником — пропуск")
             continue
         log(f"  навигатор: {'адрес' if is_addr else 'название места'} «{target}»")
-        post = sanitize(proofread(str(data.get("post", "")).strip()))
-        body, _, tags = post.rpartition("\n")
-        if not tags.strip().startswith("#"):
-            body, tags = post, ""
-        label = "Официальная страница" if it["kind"] == "expo" else "Билеты и подробности"
-        post = (f"{body.rstrip()}\n\n{navigator_hint(is_addr)}"
-                f"\n\n🔗 <a href=\"{html.escape(link, quote=True)}\">{label}</a>"
-                + (f"\n\n{tags.strip()}" if tags.strip() else ""))
+        # официальная афиша обязательна: без неё не публикуем
         if it["kind"] in ("news", "seasonal"):
             img_url = None                       # фото из СМИ не берём — только официальная афиша
             if any(urllib.parse.urlparse(link).netloc.lower().endswith(d) for d in TICKET_DOMAINS):
@@ -1173,6 +1184,17 @@ def run_events(st):
                 except Exception:
                     img_url = None
         photo = get_image(img_url, None)
+        if not photo:
+            log("  нет официальной афиши — пропуск")
+            continue
+        post = sanitize(proofread(str(data.get("post", "")).strip()))
+        body, _, tags = post.rpartition("\n")
+        if not tags.strip().startswith("#"):
+            body, tags = post, ""
+        label = "Официальная страница" if it["kind"] == "expo" else "Билеты и подробности"
+        post = (f"{body.rstrip()}\n\n{navigator_hint(is_addr)}"
+                f"\n\n🔗 <a href=\"{html.escape(link, quote=True)}\">{label}</a>"
+                + (f"\n\n{tags.strip()}" if tags.strip() else ""))
         if posted + hot > 0:
             time.sleep(PAUSE_BETWEEN_POSTS)
         try:
