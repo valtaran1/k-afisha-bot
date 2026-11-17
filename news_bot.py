@@ -13,6 +13,7 @@
 Популярные события публикуются сразу, в первую очередь.
 """
 
+import hashlib
 import html
 import json
 import math
@@ -169,6 +170,29 @@ def og_image(page, base):
     m = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)', page, re.I) \
         or re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image', page, re.I)
     return urllib.parse.urljoin(base, html.unescape(m.group(1))) if m else None
+
+
+# Заглушки сайтов (логотип, общая картинка для соцсетей) — это не афиша
+GENERIC_IMG = re.compile(r"/common/|logo|sns\.|default|noimg|no_img|share|blank|placeholder|favicon|"
+                         r"icon|thumbnailator|bakho|og_img|og-image", re.I)
+# Признаки загруженной картинки конкретного события (афиша/постер)
+POSTER_IMG = re.compile(r"imageView\.do|thumImg\.do|posterUpload|wp-content/uploads|PerfBlog|"
+                        r"BoardNotice|/upload|poster|atchmnfl|fileDown", re.I)
+
+
+def poster_image(page, base, fallback=None):
+    """Официальная афиша со страницы события: og:image, если это не заглушка сайта,
+    иначе первая загруженная картинка события на странице, иначе картинка из списка событий."""
+    og = og_image(page, base)
+    if og and not GENERIC_IMG.search(og):
+        return og
+    for src in re.findall(r"""<img[^>]+src=["']([^"']+)["']""", page, re.I):
+        s = html.unescape(src)
+        if POSTER_IMG.search(s) and not GENERIC_IMG.search(s):
+            return re.sub(r"([?&]w=)\d+", r"\g<1>1200", urllib.parse.urljoin(base, s))  # крупная версия
+    if fallback and not GENERIC_IMG.search(fallback):
+        return fallback
+    return None
 
 
 def first_dates(text):
@@ -428,7 +452,7 @@ def fetch_details(it):
         url = real
         it["article_url"] = real
     page = get_text(url)
-    img = og_image(page, url) or it.get("image")
+    img = poster_image(page, url, it.get("image"))
     text = strip_tags(page)
     if it["kind"] in ("ticket", "expo"):
         return text[:7000], img, [it["url"]]
@@ -793,6 +817,8 @@ ANSWER_FORMAT = ('Ответь строго одним JSON-объектом б�
                  '"reason": "кратко почему skip", "priority": "hot" или "normal", '
                  '"event_key": "латиницей: название-город-ГГГГММДД первой даты", '
                  '"start_date": "ГГГГ-ММ-ДД — ПЕРВЫЙ день проведения, иначе пусто", '
+                 '"sale_open": "ГГГГ-ММ-ДДTЧЧ:ММ — дата и время (по Корее) открытия ОБЩЕЙ продажи билетов, '
+                 'только если они точно указаны в материалах; иначе пусто", '
                  '"end_date": "ГГГГ-ММ-ДД — ПОСЛЕДНИЙ день проведения (для однодневного — его дата; '
                  'для сезонного места — последний день сезона, если известен), иначе пусто", '
                  '"link_index": номер ссылки из списка, "post": "текст поста", '
@@ -884,11 +910,11 @@ def bootstrap_recent(st):
     st["recent"] = rec
 
 
-def remember_event(st, title, venue, start, sig):
+def remember_event(st, title, venue, start, sig, mid=None, end="", sale="", city=""):
     rec = st.setdefault("recent", [])
     rec.append({"t": title[:80], "v": str(venue or "")[:60], "s": str(start or ""), "sig": sig,
-                "at": now_kst().isoformat()})
-    del rec[:-80]
+                "at": now_kst().isoformat(), "mid": mid, "e": end, "sale": sale, "city": city})
+    del rec[:-300]
 
 
 # ---------- корректура ----------
@@ -993,6 +1019,164 @@ def publish(text, photo, nav=None):
     if nav:
         tg("sendMessage", {"chat_id": CHANNEL, "text": nav, "parse_mode": "HTML"})
     return mid, is_caption, text
+
+
+MONTHS = ["", "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа",
+          "сентября", "октября", "ноября", "декабря"]
+
+
+def short_title(t):
+    """Короткое русское название: без эмодзи в начале и без оригинала в скобках."""
+    t = re.sub(r"^[^\wА-Яа-яЁё«\"]+", "", t or "").strip()
+    t = re.split(r"\s+\(", t)[0].strip()
+    return (t[:77] + "…") if len(t) > 80 else t
+
+
+def parse_dt(s):
+    try:
+        d = datetime.fromisoformat(str(s).strip()[:16])
+    except (TypeError, ValueError):
+        return None
+    return d.replace(tzinfo=KST) if d.tzinfo is None else d
+
+
+def post_link(mid):
+    return f"https://t.me/{CHANNEL.lstrip('@')}/{mid}"
+
+
+def send_poll(post):
+    """Опрос «Пойдёте?» под крупным концертом, затем черта-разделитель."""
+    title = short_title(next((l for l in strip_tags(post).splitlines() if l.strip()), ""))
+    try:
+        tg("sendPoll", {"chat_id": CHANNEL, "question": f"Пойдёте? {title}"[:300],
+                        "options": json.dumps([{"text": "Да, билет уже есть 🎟"},
+                                               {"text": "Хочу, буду брать билеты 🔥"},
+                                               {"text": "Подумаю 🤔"},
+                                               {"text": "Не в этот раз"}], ensure_ascii=False),
+                        "is_anonymous": "true"})
+    except Exception as e:
+        log("  опрос не отправлен:", str(e)[:200])
+    try:
+        tg("sendMessage", {"chat_id": CHANNEL, "text": SEPARATOR})
+    except Exception as e:
+        log("  черта не отправлена:", str(e)[:200])
+
+
+def remind_sales(st):
+    """Рубрика «Продажа билетов открывается»: напоминание ответом на пост за сутки до продаж
+    (если пост вышел позже — за 2 часа)."""
+    now = now_kst()
+    for r in st.get("recent", []):
+        if not r.get("mid") or not r.get("sale") or r.get("reminded"):
+            continue
+        sale = parse_dt(r["sale"])
+        if not sale or sale <= now:
+            r["reminded"] = True
+            continue
+        posted_at = parse_dt(r.get("at", "")) or now
+        when = sale - timedelta(hours=24)
+        if posted_at > when - timedelta(hours=1):          # пост вышел меньше чем за сутки до продаж
+            when = sale - timedelta(hours=2)
+            if posted_at > when - timedelta(hours=1):
+                r["reminded"] = True                        # продажи вот-вот — пост сам по себе свежий
+                continue
+        if now < when:
+            continue
+        if sale.date() == now.date():
+            day = "Сегодня"
+        elif sale.date() == (now + timedelta(days=1)).date():
+            day = "Завтра"
+        else:
+            day = f"{sale.day} {MONTHS[sale.month]}"
+        text = (f"⏰ <b>{day} в {sale:%H:%M} открывается продажа билетов</b>\n\n"
+                f"{html.escape(short_title(r.get('t', '')))}\n\n"
+                f"Подробности и ссылка на билеты — в посте выше 👆\n\n{SEPARATOR}")
+        try:
+            tg("sendMessage", {"chat_id": CHANNEL, "text": text, "parse_mode": "HTML",
+                               "reply_parameters": json.dumps({"message_id": int(r["mid"]),
+                                                               "allow_sending_without_reply": True})})
+            log(f"Напоминание о продажах: {r.get('t', '')[:60]}")
+        except Exception as e:
+            log("Напоминание не отправлено:", str(e)[:200])
+        r["reminded"] = True
+
+
+def weekly_digest(st):
+    """По понедельникам (после 10:00 KST) — «Куда сходить на этой неделе» со ссылками на посты."""
+    now = now_kst()
+    week = now.strftime("%G-W%V")
+    if now.weekday() != 0 or now.hour < 10 or st.get("digest_last") == week:
+        return
+    today, last = now.date(), now.date() + timedelta(days=6)
+    events, sales = [], []
+    for r in st.get("recent", []):
+        if not r.get("mid"):
+            continue
+        s = parse_dt(r.get("s", ""))
+        e = parse_dt(r.get("e", "")) or s
+        title = html.escape(short_title(r.get("t", "")))
+        link = f"<a href=\"{post_link(r['mid'])}\">{title}</a>"
+        city = f" ({html.escape(r['city'])})" if r.get("city") else ""
+        if s and e and s.date() <= last and e.date() >= today:
+            if s.date() < today:
+                label = f"до {e.day} {MONTHS[e.month]}"
+            elif e.date() > s.date():
+                label = f"{s.day} {MONTHS[s.month]} – {e.day} {MONTHS[e.month]}"
+            else:
+                label = f"{s.day} {MONTHS[s.month]}"
+            events.append((s.date(), f"• {label} — {link}{city}"))
+        sale = parse_dt(r.get("sale", ""))
+        if sale and now <= sale and sale.date() <= last:
+            sales.append((sale, f"• {sale.day} {MONTHS[sale.month]} в {sale:%H:%M} — {link}"))
+    st["digest_last"] = week
+    if not events and not sales:
+        log("Подборка недели: событий нет — пропуск")
+        return
+    text = (f"🗓 <b>Куда сходить на этой неделе</b>\n"
+            f"{today.day} {MONTHS[today.month]} — {last.day} {MONTHS[last.month]}\n")
+    if events:
+        text += "\n" + "\n".join(l for _, l in sorted(events)[:30]) + "\n"
+    if sales:
+        text += "\n🎟 <b>Открытие продаж на этой неделе</b>\n" + "\n".join(l for _, l in sorted(sales)[:15]) + "\n"
+    text += "\n📤 Перешлите подборку друзьям — им тоже пригодится!\n\n" + SEPARATOR
+    if len(text) > 4000:
+        text = text[:3900].rsplit("\n•", 1)[0] + "\n…\n\n" + SEPARATOR
+    try:
+        tg("sendMessage", {"chat_id": CHANNEL, "text": text, "parse_mode": "HTML",
+                           "disable_web_page_preview": "true"})
+        log(f"Подборка недели опубликована: событий {len(events)}, продаж {len(sales)}")
+    except Exception as e:
+        log("Подборка недели не отправлена:", str(e)[:200])
+
+
+GUIDE_FILE = "guide.txt"
+
+
+def post_guide(st):
+    """Публикует (или обновляет) и закрепляет памятку из guide.txt."""
+    with open(GUIDE_FILE, encoding="utf-8") as f:
+        text = f.read().strip()
+    mid = st.get("guide_mid")
+    if mid:
+        try:
+            tg("editMessageText", {"chat_id": CHANNEL, "message_id": mid, "text": text,
+                                   "parse_mode": "HTML", "disable_web_page_preview": "true"})
+            log("Памятка обновлена")
+            return
+        except Exception as e:
+            if "not modified" in str(e):
+                log("Памятка не изменилась")
+                return
+            log("Памятку не удалось обновить, публикую заново:", str(e)[:200])
+    mid = tg("sendMessage", {"chat_id": CHANNEL, "text": text, "parse_mode": "HTML",
+                             "disable_web_page_preview": "true"})
+    st["guide_mid"] = mid
+    save_state(st)
+    try:
+        tg("pinChatMessage", {"chat_id": CHANNEL, "message_id": mid, "disable_notification": "true"})
+        log("Памятка опубликована и закреплена")
+    except Exception as e:
+        log("Памятка опубликована, но не закреплена:", str(e)[:200])
 
 
 def mark_finished(st):
@@ -1211,12 +1395,16 @@ def run_events(st):
             img_url = None                       # фото из СМИ не берём — только официальная афиша
             if any(urllib.parse.urlparse(link).netloc.lower().endswith(d) for d in TICKET_DOMAINS):
                 try:
-                    img_url = og_image(get_text(link, timeout=20), link)
+                    img_url = poster_image(get_text(link, timeout=20), link)
                 except Exception:
                     img_url = None
         photo = get_image(img_url, None)
         if not photo:
             log("  нет официальной афиши — пропуск")
+            continue
+        photo_hash = hashlib.sha1(photo).hexdigest()
+        if photo_hash in st.setdefault("img_hashes", []):
+            log("  эта картинка уже была в другом посте (заглушка сайта, а не афиша) — пропуск")
             continue
         post = sanitize(proofread(str(data.get("post", "")).strip()))
         body, _, tags = post.rpartition("\n")
@@ -1229,10 +1417,15 @@ def run_events(st):
         if posted + hot > 0:
             time.sleep(PAUSE_BETWEEN_POSTS)
         try:
-            mid, is_caption, sent_text = publish(post, photo, navigator_message(target, is_addr))
+            mid, is_caption, sent_text = publish(post, photo, navigator_message(target, is_addr,
+                                                                                last=not is_hot))
         except Exception as e:
             log("  ошибка публикации:", str(e)[:300])
             continue
+        st["img_hashes"].append(photo_hash)
+        del st["img_hashes"][:-300]
+        if is_hot:
+            send_poll(post)
         end_date = str(data.get("end_date", "")).strip()
         if mid and re.fullmatch(r"\d{4}-\d{2}-\d{2}", end_date):
             st["posted"][str(mid)] = {"end": end_date, "caption": is_caption, "text": sent_text}
@@ -1243,7 +1436,9 @@ def run_events(st):
         st["events"][ekey or it["norm"]] = now_kst().isoformat()
         st["events"][it["norm"]] = now_kst().isoformat()
         title = next((l.strip() for l in strip_tags(post).splitlines() if l.strip()), it["title"])
-        remember_event(st, title, data.get("venue_ko", ""), data.get("start_date", ""), sig)
+        remember_event(st, title, data.get("venue_ko", ""), data.get("start_date", ""), sig,
+                       mid=mid, end=end_date, sale=str(data.get("sale_open", "")).strip(),
+                       city=str(data.get("city_ru", "")).strip())
         save_state(st)
         log("  ✅ опубликовано" + (" (🔥 популярное)" if is_hot else ""))
     log(f"Готово: опубликовано {posted + hot} (популярных {hot}), проверено ИИ {checked}")
@@ -1312,11 +1507,16 @@ def main():
     log(f"Режим: {MODE}")
     if MODE == "seasonal":
         run_seasonal(st)
+    elif MODE == "guide":
+        post_guide(st)
     else:
-        try:
-            mark_finished(st)
-        except Exception as e:
-            log("Пометка завершившихся не удалась:", str(e)[:200])
+        for name, fn in (("Пометка завершившихся", mark_finished), ("Напоминания о продажах", remind_sales),
+                         ("Подборка недели", weekly_digest)):
+            try:
+                fn(st)
+            except Exception as e:
+                log(f"{name} не удалась:", str(e)[:200])
+        save_state(st)
         run_events(st)
     save_state(st)
 
