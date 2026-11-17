@@ -46,7 +46,7 @@ jobs:
         run: |
           git config user.name "news-bot"
           git config user.email "news-bot@users.noreply.github.com"
-          git add seen.json || true
+          git add seen.json docs || true
           git diff --cached --quiet && exit 0
           git commit -m "update seen"
           # при столкновении с другим запуском оставляем свою (более свежую) версию seen.json
