@@ -174,7 +174,7 @@ def og_image(page, base):
 
 # Заглушки сайтов (логотип, общая картинка для соцсетей) — это не афиша
 GENERIC_IMG = re.compile(r"/common/|logo|sns\.|default|noimg|no_img|share|blank|placeholder|favicon|"
-                         r"icon|thumbnailator|bakho|og_img|og-image", re.I)
+                         r"icon|thumbnailator|bakho|og_img|og-image|/themes/|/assets/|/bg[_\-.]", re.I)
 # Признаки загруженной картинки конкретного события (афиша/постер)
 POSTER_IMG = re.compile(r"imageView\.do|thumImg\.do|posterUpload|wp-content/uploads|PerfBlog|"
                         r"BoardNotice|/upload|poster|atchmnfl|fileDown", re.I)
@@ -434,8 +434,9 @@ def fetch_details(it):
                         data={"bId": it["yes24_id"], "genre": "", "province": "", "order": "1"},
                         headers={"Referer": "https://ticket.yes24.com/New/Notice/NoticeMain.aspx",
                                  "X-Requested-With": "XMLHttpRequest"})
-        img = re.search(r"""<img[^>]+src=["']([^"']+\.(?:jpg|jpeg|png|gif)[^"']*)["']""", page, re.I)
-        img = urllib.parse.urljoin("https://ticket.yes24.com/", img.group(1)) if img else None
+        imgs = re.findall(r"""<img[^>]+src=["']([^"']+\.(?:jpg|jpeg|png|gif)[^"']*)["']""", page, re.I)
+        img = next((urllib.parse.urljoin("https://ticket.yes24.com/", s) for s in imgs
+                    if not GENERIC_IMG.search(s)), None)        # без заглушки «нет изображения»
         perf = re.search(r'(https?://ticket\.yes24\.com/Perf/\d+)', page)
         links = [perf.group(1)] if perf else []
         return strip_tags(page)[:7000], img, links + [it["url"]]
@@ -1609,6 +1610,9 @@ def site_repair(events):
             if tag:
                 ev["city"] = tag
                 changed = True
+        if ev.get("img") and GENERIC_IMG.search(ev["img"]):     # заглушка сайта вместо афиши — ищем заново
+            ev["img"], ev["img_try"] = "", False
+            changed = True
         if ev.get("img") or ev.get("img_try") or not link_ok(ev.get("link", "")):
             continue
         ev["img_try"] = True
