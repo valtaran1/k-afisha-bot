@@ -47,4 +47,11 @@ jobs:
           git config user.name "news-bot"
           git config user.email "news-bot@users.noreply.github.com"
           git add seen.json || true
-          git diff --cached --quiet || (git commit -m "update seen" && git pull --rebase -q && git push)
+          git diff --cached --quiet && exit 0
+          git commit -m "update seen"
+          # при столкновении с другим запуском оставляем свою (более свежую) версию seen.json
+          for i in 1 2 3; do
+            git pull --rebase -X theirs -q && git push && exit 0
+            sleep 5
+          done
+          exit 1
