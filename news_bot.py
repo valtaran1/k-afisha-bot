@@ -561,9 +561,9 @@ _bad_models = set()
 _search_ok = USE_GOOGLE_SEARCH
 _models = None
 _ST = {"ai_exhausted": {}}   # заменяется состоянием из seen.json в main()
-MAX_MODELS = 10
+MAX_MODELS = 20
 _SKIP_MODEL = re.compile(r"image|tts|audio|live|embed|vision|robotics|computer|nano|omni|"
-                         r"learnlm|aqa|thinking|-pro|banana|veo|imagen", re.I)
+                         r"learnlm|aqa|thinking|-pro|banana|veo|imagen|transcribe", re.I)
 
 
 def pt_day():
@@ -624,6 +624,7 @@ def gemini(prompt, search=False):
             payload["generationConfig"]["responseMimeType"] = "application/json"
         url = (f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
                f"?key={GEMINI_API_KEY}")
+        search_dropped = False
         for attempt in (1, 2):
             try:
                 res = post_json(url, payload, timeout=GEMINI_TIMEOUT)
@@ -632,13 +633,25 @@ def gemini(prompt, search=False):
                 sources = [c["web"]["uri"] for c in
                            cand.get("groundingMetadata", {}).get("groundingChunks", []) if "web" in c]
                 log(f"  ИИ: {model}" + (" + поиск Google" if use_search else ""))
+                if search_dropped:
+                    _search_ok = False           # лимит поиска кончился — до конца запуска без него
                 return text, sources
             except urllib.error.HTTPError as e:
                 full = e.read().decode(errors="ignore")
                 msg = full[:300]
-                if e.code == 429 and "PerDay" in full:
-                    exhausted[model] = pt_day()      # дневной лимит кончился — до 17:00 KST не трогаем
-                    log(f"  {model}: дневной лимит исчерпан")
+                if e.code == 429:
+                    quotas = re.findall(r'"quotaId":\s*"([^"]+)"(?:[^}]*?"quotaValue":\s*"(\d+)")?', full)
+                    msg = "лимит: " + (", ".join(f"{q}={v or '?'}" for q, v in quotas) or msg[:200])
+                    if use_search and attempt == 1:
+                        # возможно, кончился лимит именно на поиск Google — пробуем ту же модель без поиска
+                        log(f"  {model} с поиском: {msg[:200]} — повтор без поиска")
+                        use_search = False
+                        search_dropped = True
+                        payload.pop("tools", None)
+                        payload["generationConfig"]["responseMimeType"] = "application/json"
+                        continue
+                    if "PerDay" in full:
+                        exhausted[model] = pt_day()  # дневной лимит кончился — до 17:00 KST не трогаем
                 if use_search and e.code in (400, 403) and attempt == 1:
                     log(f"  поиск Google в Gemini недоступен (HTTP {e.code}) — продолжаю без него")
                     _search_ok = use_search = False
