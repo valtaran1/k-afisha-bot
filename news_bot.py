@@ -1440,6 +1440,13 @@ def run_events(st):
         remember_event(st, title, data.get("venue_ko", ""), data.get("start_date", ""), sig,
                        mid=mid, end=end_date, sale=str(data.get("sale_open", "")).strip(),
                        city=str(data.get("city_ru", "")).strip())
+        try:
+            site_add({"mid": mid, "title": title, "text": sent_text, "start": data.get("start_date", ""),
+                      "end": end_date, "city": str(data.get("city_ru", "")).strip(), "place": target,
+                      "is_addr": is_addr, "link": link, "img": img_url or "",
+                      "posted": now_kst().isoformat(timespec="seconds")})
+        except Exception as e:
+            log("  сайт: событие не сохранено:", str(e)[:200])
         save_state(st)
         log("  ✅ опубликовано" + (" (🔥 популярное)" if is_hot else ""))
     log(f"Готово: опубликовано {posted + hot} (популярных {hot}), проверено ИИ {checked}")
@@ -1499,6 +1506,240 @@ def run_seasonal(st):
     log("✅ сезонный обзор опубликован")
 
 
+# ---------- сайт-зеркало (GitHub Pages, папка docs/) ----------
+SITE_DIR = "docs"
+SITE_URL = os.environ.get("SITE_URL", "https://valtaran1.github.io/k-afisha-bot").rstrip("/")
+SITE_DATA = os.path.join(SITE_DIR, "events.json")
+CHANNEL_URL = f"https://t.me/{CHANNEL.lstrip('@')}"
+
+SITE_CSS = """
+:root{--bg:#f6f4f1;--card:#fff;--text:#1d1b19;--muted:#6b665f;--accent:#d6336c;--line:#e7e2db}
+@media (prefers-color-scheme:dark){:root{--bg:#141312;--card:#1f1d1b;--text:#f1ede8;--muted:#a59e95;
+--accent:#ff6b9a;--line:#33302c}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);
+font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}
+a{color:var(--accent)}.wrap{max-width:860px;margin:0 auto;padding:0 16px}
+header{padding:28px 0 12px}header a{text-decoration:none;color:var(--text)}
+h1{font-size:28px;line-height:1.2;margin:0 0 6px}.sub{color:var(--muted);margin:0 0 16px}
+.cta{display:inline-block;background:var(--accent);color:#fff;text-decoration:none;font-weight:600;
+padding:10px 18px;border-radius:999px}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin:18px 0}.chip{border:1px solid var(--line);
+background:var(--card);color:var(--text);border-radius:999px;padding:5px 12px;cursor:pointer;font:inherit}
+.chip.on{background:var(--text);color:var(--bg)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:16px;margin:8px 0 32px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden;
+text-decoration:none;color:var(--text);display:flex;flex-direction:column}
+.card img{width:100%;aspect-ratio:3/4;object-fit:cover;background:var(--line)}
+.card .b{padding:12px}.card .d{color:var(--accent);font-weight:600;font-size:14px}
+.card .t{font-weight:600;margin-top:4px}.card .c{color:var(--muted);font-size:14px}
+h2{font-size:20px;margin:28px 0 8px}.post{background:var(--card);border:1px solid var(--line);
+border-radius:14px;padding:18px;margin:12px 0 20px;overflow-wrap:anywhere}
+.post img{max-width:100%;border-radius:10px;display:block;margin:0 auto 14px}
+.addr{background:var(--card);border:1px dashed var(--accent);border-radius:10px;padding:12px;margin:0 0 20px}
+.addr code{font-size:17px;user-select:all}.done{color:var(--muted);font-weight:600}
+footer{color:var(--muted);font-size:14px;padding:24px 0 40px;border-top:1px solid var(--line);margin-top:24px}
+"""
+
+
+def site_load():
+    try:
+        with open(SITE_DATA, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def site_save(events):
+    os.makedirs(SITE_DIR, exist_ok=True)
+    with open(SITE_DATA, "w", encoding="utf-8") as f:
+        json.dump(events, f, ensure_ascii=False, indent=0)
+
+
+def site_add(ev):
+    events = [e for e in site_load() if str(e.get("mid")) != str(ev.get("mid"))]
+    events.append(ev)
+    site_save(events)
+
+
+def site_backfill(st):
+    """Один раз: переносим на сайт посты, которые уже есть в seen.json → posted."""
+    if os.path.exists(SITE_DATA) or not st.get("posted"):
+        return
+    events = []
+    for mid, p in st["posted"].items():
+        text = p.get("text", "")
+        lines = [l.strip() for l in strip_tags(text).splitlines() if l.strip()]
+        place = next((l for l in lines if l.startswith("📍")), "")
+        ko = re.findall(r"\(([^()]*[가-힣][^()]*)\)", place)
+        href = re.search(r'href="([^"]+)"', text)
+        events.append({"mid": int(mid), "title": lines[0] if lines else "", "text": text, "start": "",
+                       "end": p.get("end", ""), "city": "", "place": ko[-1] if ko else "",
+                       "is_addr": False, "link": html.unescape(href.group(1)) if href else "",
+                       "img": "", "posted": ""})
+    site_save(events)
+    log(f"Сайт: перенесено старых постов: {len(events)}")
+
+
+def _d(s):
+    d = parse_dt(s)
+    return d.date() if d else None
+
+
+def date_label(ev):
+    s, e = _d(ev.get("start")), _d(ev.get("end"))
+    if s and e and e > s:
+        return f"{s.day} {MONTHS[s.month]} – {e.day} {MONTHS[e.month]} {e.year}"
+    if s or e:
+        x = s or e
+        return f"{x.day} {MONTHS[x.month]} {x.year}"
+    return ""
+
+
+def post_body_html(text):
+    """Текст поста (HTML Telegram) → HTML страницы: без подсказки про навигатор и черты."""
+    lines = [l for l in (text or "").split("\n")
+             if not l.strip().startswith("🧭") and SEPARATOR not in l]
+    body = "\n".join(lines).strip()
+    body = body.replace("<a href=", '<a rel="nofollow noopener" target="_blank" href=')
+    return re.sub(r"\n{3,}", "\n\n", body).replace("\n", "<br>\n")
+
+
+def page(title, desc, url, body, image="", extra_head=""):
+    e = html.escape
+    return ("<!doctype html>\n<html lang=\"ru\"><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+            f"<title>{e(title)}</title><meta name=\"description\" content=\"{e(desc, quote=True)}\">"
+            f"<link rel=\"canonical\" href=\"{e(url, quote=True)}\">"
+            f"<meta property=\"og:title\" content=\"{e(title, quote=True)}\">"
+            f"<meta property=\"og:description\" content=\"{e(desc, quote=True)}\">"
+            f"<meta property=\"og:url\" content=\"{e(url, quote=True)}\"><meta property=\"og:type\" content=\"website\">"
+            + (f"<meta property=\"og:image\" content=\"{e(image, quote=True)}\">" if image else "")
+            + f"<style>{SITE_CSS}</style>{extra_head}</head><body><div class=\"wrap\">"
+            "<header><a href=\"" + SITE_URL + "/\"><h1>К-Афиша</h1></a>"
+            "<p class=\"sub\">События в Корее на русском: концерты, мюзиклы, выставки, фестивали</p>"
+            f"<a class=\"cta\" href=\"{CHANNEL_URL}\">Подписаться в Telegram</a></header>"
+            f"{body}<footer>Анонсы публикуются в Telegram-канале <a href=\"{CHANNEL_URL}\">{e(CHANNEL)}</a>. "
+            "Билеты покупайте только по официальным ссылкам. Условия и цены уточняйте у организатора."
+            "</footer></div></body></html>\n")
+
+
+def write_if_changed(path, text):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    try:
+        with open(path, encoding="utf-8") as f:
+            if f.read() == text:
+                return
+    except OSError:
+        pass
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
+def event_page(ev, today):
+    e = html.escape
+    title = short_title(ev.get("title", "")) or "Событие"
+    when = date_label(ev)
+    city = ev.get("city", "")
+    url = f"{SITE_URL}/e/{ev['mid']}.html"
+    plain = [l.strip() for l in strip_tags(ev.get("text", "")).splitlines() if l.strip()]
+    desc = next((l for l in plain[1:] if not l[:1] in "📅🕐📍💰🎟⏱🧭🔗#"), "")[:155]
+    head_title = f"{title}" + (f" — {city}" if city else "") + (f", {when}" if when else "") + " | К-Афиша"
+    end = _d(ev.get("end")) or _d(ev.get("start"))
+    done = bool(end and end < today)
+    img = ev.get("img", "")
+    body = ""
+    if done:
+        body += "<p class=\"done\">❌ Мероприятие завершилось</p>"
+    body += "<article class=\"post\">"
+    if img:
+        body += (f"<img src=\"{e(img, quote=True)}\" alt=\"{e(title, quote=True)}\" "
+                 "referrerpolicy=\"no-referrer\" loading=\"lazy\">")
+    body += post_body_html(ev.get("text", "")) + "</article>"
+    if ev.get("place"):
+        label = "Адрес для навигатора" if ev.get("is_addr") else "Место (найдите в Naver/Kakao Map)"
+        body += f"<div class=\"addr\">🧭 {label}:<br><code>{e(ev['place'])}</code></div>"
+    body += (f"<p><a class=\"cta\" href=\"{CHANNEL_URL}/{ev['mid']}\">Открыть пост в Telegram</a></p>"
+             f"<p><a href=\"{SITE_URL}/\">← Все события</a></p>")
+    ld = {"@context": "https://schema.org", "@type": "Event", "name": title,
+          "description": desc, "url": url,
+          "eventAttendanceMode": "https://schema.org/OfflineEventAttendanceMode",
+          "eventStatus": "https://schema.org/EventScheduled"}
+    if _d(ev.get("start")):
+        ld["startDate"] = ev["start"]
+    if _d(ev.get("end")):
+        ld["endDate"] = ev["end"]
+    if ev.get("place"):
+        ld["location"] = {"@type": "Place", "name": ev["place"],
+                          "address": {"@type": "PostalAddress", "addressCountry": "KR",
+                                      "streetAddress" if ev.get("is_addr") else "addressLocality":
+                                          ev["place"] if ev.get("is_addr") else (city or ev["place"])}}
+    if img:
+        ld["image"] = [img]
+    if ev.get("link"):
+        ld["offers"] = {"@type": "Offer", "url": ev["link"]}
+    extra = ("<script type=\"application/ld+json\">"
+             + json.dumps(ld, ensure_ascii=False).replace("</", "<\\/") + "</script>")
+    return page(head_title, desc or head_title, url, body, img, extra)
+
+
+def build_site(st):
+    site_backfill(st)
+    events = [ev for ev in site_load() if ev.get("mid")]
+    if not events:
+        return
+    today = now_kst().date()
+    for ev in events:
+        write_if_changed(os.path.join(SITE_DIR, "e", f"{ev['mid']}.html"), event_page(ev, today))
+
+    def key(ev):
+        return (_d(ev.get("start")) or _d(ev.get("end")) or today, str(ev.get("mid")))
+
+    upcoming = sorted([ev for ev in events if (_d(ev.get("end")) or _d(ev.get("start")) or today) >= today],
+                      key=key)
+    past = sorted([ev for ev in events if ev not in upcoming], key=key, reverse=True)[:60]
+    e = html.escape
+
+    def cards(lst):
+        out = []
+        for ev in lst:
+            img = ev.get("img", "")
+            out.append(f"<a class=\"card\" data-city=\"{e(ev.get('city', ''), quote=True)}\" "
+                       f"href=\"{SITE_URL}/e/{ev['mid']}.html\">"
+                       + (f"<img src=\"{e(img, quote=True)}\" alt=\"\" loading=\"lazy\" "
+                          "referrerpolicy=\"no-referrer\">" if img else "")
+                       + f"<div class=\"b\"><div class=\"d\">{e(date_label(ev))}</div>"
+                       f"<div class=\"t\">{e(short_title(ev.get('title', '')))}</div>"
+                       f"<div class=\"c\">{e(ev.get('city', ''))}</div></div></a>")
+        return "<div class=\"grid\">" + "".join(out) + "</div>"
+
+    cities = sorted({ev.get("city") for ev in upcoming if ev.get("city")})
+    chips = ("<div class=\"chips\"><button class=\"chip on\" data-c=\"\">Все города</button>"
+             + "".join(f"<button class=\"chip\" data-c=\"{e(c, quote=True)}\">{e(c)}</button>" for c in cities)
+             + "</div>") if cities else ""
+    script = ("<script>document.querySelectorAll('.chip').forEach(function(b){b.onclick=function(){"
+              "document.querySelectorAll('.chip').forEach(function(x){x.classList.remove('on')});"
+              "b.classList.add('on');var c=b.getAttribute('data-c');"
+              "document.querySelectorAll('#up .card').forEach(function(k){"
+              "k.style.display=(!c||k.getAttribute('data-city')===c)?'':'none'})}})</script>")
+    body = (f"<h2>Ближайшие события</h2>{chips}<div id=\"up\">{cards(upcoming)}</div>"
+            + (f"<h2>Прошедшие</h2>{cards(past)}" if past else "") + script)
+    write_if_changed(os.path.join(SITE_DIR, "index.html"),
+                     page("К-Афиша — концерты, мюзиклы и выставки в Корее на русском",
+                          "Афиша событий в Корее на русском языке: концерты K-pop и мировых звёзд, мюзиклы, "
+                          "выставки и фестивали в Сеуле, Пусане и других городах. Даты, цены, билеты.",
+                          SITE_URL + "/", body))
+    urls = [SITE_URL + "/"] + [f"{SITE_URL}/e/{ev['mid']}.html" for ev in events]
+    write_if_changed(os.path.join(SITE_DIR, "sitemap.xml"),
+                     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                     "<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n"
+                     + "".join(f"<url><loc>{html.escape(u)}</loc></url>\n" for u in urls) + "</urlset>\n")
+    write_if_changed(os.path.join(SITE_DIR, "robots.txt"),
+                     f"User-agent: *\nAllow: /\nSitemap: {SITE_URL}/sitemap.xml\n")
+    write_if_changed(os.path.join(SITE_DIR, ".nojekyll"), "")
+    log(f"Сайт обновлён: событий {len(events)} (ближайших {len(upcoming)})")
+
+
 def main():
     global _ST
     st = load_state()
@@ -1510,6 +1751,8 @@ def main():
         run_seasonal(st)
     elif MODE == "guide":
         post_guide(st)
+    elif MODE == "site":
+        build_site(st)
     else:
         for name, fn in (("Пометка завершившихся", mark_finished), ("Напоминания о продажах", remind_sales),
                          ("Подборка недели", weekly_digest)):
@@ -1519,6 +1762,10 @@ def main():
                 log(f"{name} не удалась:", str(e)[:200])
         save_state(st)
         run_events(st)
+        try:
+            build_site(st)
+        except Exception as e:
+            log("Сайт не обновлён:", str(e)[:200])
     save_state(st)
 
 
