@@ -33,7 +33,8 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 # Kakao Local API (бесплатно): по названию площадки находит точный адрес, как Kakao Map
 KAKAO_REST_KEY = os.environ.get("KAKAO_REST_KEY", "")
 GEMINI_MODELS = os.environ.get("GEMINI_MODELS",
-                               "gemini-flash-latest,gemini-flash-lite-latest,gemma-3-27b-it")
+                               "gemini-flash-latest,gemini-flash-lite-latest")
+# остальные доступные модели (Gemma и др.) бот находит сам — см. model_list()
 GEMINI_TIMEOUT = 60
 USE_GOOGLE_SEARCH = True     # уточнять детали через поиск Google внутри Gemini (если доступно)
 
@@ -558,6 +559,49 @@ def navigator_hint(is_address):
 # ---------- ИИ ----------
 _bad_models = set()
 _search_ok = USE_GOOGLE_SEARCH
+_models = None
+_ST = {"ai_exhausted": {}}   # заменяется состоянием из seen.json в main()
+MAX_MODELS = 10
+_SKIP_MODEL = re.compile(r"image|tts|audio|live|embed|vision|robotics|computer|nano|omni|"
+                         r"learnlm|aqa|thinking|-pro|banana|veo|imagen", re.I)
+
+
+def pt_day():
+    """Дневные лимиты Gemini обнуляются в полночь по тихоокеанскому времени (17:00 по Корее)."""
+    return (datetime.now(timezone.utc) - timedelta(hours=8)).strftime("%Y-%m-%d")
+
+
+def model_list():
+    """Модели, доступные этому ключу: сначала из GEMINI_MODELS, потом остальные Flash, Flash-Lite
+    и крупные Gemma. У каждой модели свой бесплатный дневной лимит — так их хватает надолго."""
+    global _models
+    if _models is not None:
+        return _models
+    preferred = [m.strip() for m in GEMINI_MODELS.split(",") if m.strip()]
+    found = []
+    try:
+        res = json.loads(get_text("https://generativelanguage.googleapis.com/v1beta/models"
+                                  f"?pageSize=1000&key={GEMINI_API_KEY}", timeout=20))
+        for m in res.get("models", []):
+            name = m.get("name", "").replace("models/", "")
+            if ("generateContent" in m.get("supportedGenerationMethods", [])
+                    and re.match(r"(gemini|gemma)-", name) and not _SKIP_MODEL.search(name)):
+                found.append(name)
+    except Exception as e:
+        log("  список моделей не получен:", str(e)[:150])
+
+    def rank(n):
+        size = re.search(r"-(\d+)b", n)
+        if n.startswith("gemma"):
+            return (2, -(int(size.group(1)) if size else 0), n)
+        return (1 if "lite" in n else 0, 0, "".join(chr(255 - ord(c)) for c in n))  # новее — раньше
+
+    gemma_ok = [n for n in found if not n.startswith("gemma")
+                or (re.search(r"-(\d+)b", n) and int(re.search(r"-(\d+)b", n).group(1)) >= 12)]
+    others = sorted((n for n in gemma_ok if n not in preferred), key=rank)
+    _models = ([m for m in preferred if not found or m in found] + others)[:MAX_MODELS] or preferred
+    log("  модели ИИ:", ", ".join(_models))
+    return _models
 
 
 def gemini(prompt, search=False):
@@ -566,8 +610,9 @@ def gemini(prompt, search=False):
     if not GEMINI_API_KEY:
         raise RuntimeError("не указан GEMINI_API_KEY")
     errors = []
-    for model in [m.strip() for m in GEMINI_MODELS.split(",") if m.strip()]:
-        if model in _bad_models:
+    exhausted = _ST.setdefault("ai_exhausted", {})
+    for model in model_list():
+        if model in _bad_models or exhausted.get(model) == pt_day():
             continue
         is_gemma = model.startswith("gemma")      # Gemma: без поиска и без JSON-режима
         use_search = search and _search_ok and not is_gemma
@@ -589,7 +634,11 @@ def gemini(prompt, search=False):
                 log(f"  ИИ: {model}" + (" + поиск Google" if use_search else ""))
                 return text, sources
             except urllib.error.HTTPError as e:
-                msg = e.read().decode(errors="ignore")[:300]
+                full = e.read().decode(errors="ignore")
+                msg = full[:300]
+                if e.code == 429 and "PerDay" in full:
+                    exhausted[model] = pt_day()      # дневной лимит кончился — до 17:00 KST не трогаем
+                    log(f"  {model}: дневной лимит исчерпан")
                 if use_search and e.code in (400, 403) and attempt == 1:
                     log(f"  поиск Google в Gemini недоступен (HTTP {e.code}) — продолжаю без него")
                     _search_ok = use_search = False
@@ -1092,7 +1141,11 @@ def run_seasonal(st):
 
 
 def main():
+    global _ST
     st = load_state()
+    today = pt_day()
+    st["ai_exhausted"] = {m: d for m, d in st.get("ai_exhausted", {}).items() if d == today}
+    _ST = st
     log(f"Режим: {MODE}")
     if MODE == "seasonal":
         run_seasonal(st)
