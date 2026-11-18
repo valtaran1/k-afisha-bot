@@ -509,40 +509,83 @@ def venue_from_text(text):
     return squash(m.group(1)) if m else None
 
 
+# Город по-русски → как он пишется в корейском адресе (для проверки, что Kakao нашёл место в нужном городе)
 SIDO_RU = {"Сеул": "서울", "Пусан": "부산", "Инчхон": "인천", "Тэгу": "대구", "Тэджон": "대전",
-           "Кванджу": "광주", "Ульсан": "울산", "Сечжон": "세종", "Кёнгидо": "경기", "Гоян": "경기",
-           "Сувон": "경기", "Сонам": "경기", "Пхаджу": "경기", "Канвондо": "강원", "Чеджу": "제주"}
+           "Кванджу": "광주", "Ульсан": "울산", "Сечжон": "세종", "Кёнгидо": "경기", "Гоян": "고양",
+           "Сувон": "수원", "Сонам": "성남", "Пхаджу": "파주", "Канвондо": "강원", "Чеджу": "제주",
+           "Чханвон": "창원", "Пхохан": "포항", "Кёнджу": "경주", "Чонджу": "전주", "Чхонан": "천안",
+           "Каннын": "강릉", "Сокчхо": "속초", "Пхёнчхан": "평창", "Ёсу": "여수", "Кимхэ": "김해",
+           "Ансан": "안산", "Йонъин": "용인", "Чхунчхон": "춘천", "Вонджу": "원주", "Чхонджу": "청주",
+           "Мокпхо": "목포", "Сунчхон": "순천", "Тхонъён": "통영", "Кочже": "거제", "Чинджу": "진주",
+           "Кунсан": "군산", "Андон": "안동", "Хвасон": "화성", "Пучхон": "부천"}
 
 
 def _norm(t):
     return re.sub(r"[\W_]+", "", (t or "").lower())
 
 
+# Название зала внутри здания: «3·15아트홀 대극장» → здание «3·15아트홀»
+HALL_SUFFIX = re.compile(r"\s+(?:대극장|중극장|소극장|대공연장|중공연장|소공연장|공연장|대강당|소강당|강당|"
+                         r"블랙|화이트|레드|[A-Za-z]\s*씨어터|\d+\s*관|[A-Za-z]\s*홀|\d+\s*홀|\d+층)$")
+
+
+def venue_base(venue):
+    v = squash(venue)
+    while True:
+        b = HALL_SUFFIX.sub("", v).strip()
+        if b == v or len(b) < 2:
+            return v
+        v = b
+
+
+def _prefix(a, b):
+    n = 0
+    while n < min(len(a), len(b)) and a[n] == b[n]:
+        n += 1
+    return n
+
+
+def _kakao_search(query):
+    url = "https://dapi.kakao.com/v2/local/search/keyword.json?size=15&query=" + urllib.parse.quote(query)
+    raw, _, _ = http(url, timeout=15, headers={"Authorization": f"KakaoAK {KAKAO_REST_KEY}"})
+    return json.loads(raw.decode()).get("documents", [])
+
+
 def kakao_lookup(venue, region_hint=None):
-    """Ищем площадку в Kakao Map и берём её дорожный адрес — но только если совпадение однозначное:
-    название места на карте совпадает с названием из афиши (или полностью входит в него), и у всех
-    таких совпадений один и тот же адрес. Иначе None."""
+    """Ищем площадку в Kakao Map и берём её дорожный адрес — только при однозначном совпадении:
+    название на карте = название из афиши (или здание, в котором этот зал), место — культурное
+    (концертный зал, театр, выставочный центр), город совпадает, и у всех совпадений один адрес."""
     if not (KAKAO_REST_KEY and venue):
         return None
-    url = ("https://dapi.kakao.com/v2/local/search/keyword.json?size=15&query="
-           + urllib.parse.quote(venue))
+    base = venue_base(venue)
+    docs = []
     try:
-        raw, _, _ = http(url, timeout=15, headers={"Authorization": f"KakaoAK {KAKAO_REST_KEY}"})
-        docs = json.loads(raw.decode()).get("documents", [])
+        for q in dict.fromkeys([squash(venue), base]):
+            docs += _kakao_search(q)
     except Exception as e:
         log("  Kakao: поиск не удался:", str(e)[:120])
         return None
-    nv = _norm(venue)
-    exact = [d for d in docs if _norm(d.get("place_name")) == nv]
-    part = [d for d in docs if len(_norm(d.get("place_name"))) >= 4 and _norm(d.get("place_name")) in nv]
-    cands = exact or part
+    nv, nb = _norm(venue), _norm(base)
+    culture = re.compile(r"문화|예술|공연|극장|아트|홀|컨벤션|전시|체육|경기장|대학|공원|센터")
+
+    def similar(d):
+        name = _norm(d.get("place_name"))
+        if len(name) < 3:
+            return False
+        if name in (nv, nb) or (len(name) >= 4 and name in nv):
+            return True
+        # то же здание под немного другим названием (3·15아트홀 ↔ 3·15아트센터) — только культурные места
+        return (_prefix(name, nb) >= max(4, len(nb) - 2)
+                and (d.get("category_group_code") == "CT1" or culture.search(d.get("category_name", ""))))
+
+    cands = [d for d in docs if similar(d)]
     if region_hint:
-        cands = [d for d in cands if (d.get("road_address_name") or d.get("address_name", "")).startswith(region_hint)]
+        cands = [d for d in cands if region_hint in (d.get("road_address_name") or d.get("address_name") or "")]
     addrs = {(d.get("road_address_name") or d.get("address_name") or "").strip() for d in cands}
     addrs.discard("")
     if len(addrs) == 1:
         a = addrs.pop()
-        log(f"  Kakao: «{venue}» → {a} ({len(cands)} совп.)")
+        log(f"  Kakao: «{venue}» → {a} (на карте: {cands[0].get('place_name')}, совп. {len(cands)})")
         return a
     log(f"  Kakao: «{venue}» — однозначного совпадения нет (вариантов адреса: {len(addrs)})")
     return None
@@ -781,6 +824,9 @@ K-pop группы и солисты с международным фандом�
 живо, без канцелярита. Корейские имена — по Концевичу, устоявшиеся формы как в русских СМИ
 (Сеул, Пусан, Самсунг). Названия K-pop групп — как пишут фанаты (BTS, THE BOYZ), при первом
 упоминании можно оригинал в скобках. Корейские реалии кратко поясняй.
+Иностранные имена и названия, записанные по-корейски, возвращай к их настоящей форме, а не
+транслитерируй корейское написание: 리즈 콩쿠르 — конкурс пианистов в Лидсе, 베를린 필하모닉 —
+Берлинский филармонический оркестр, 차이콥스키 — Чайковский.
 Название события (концерта, тура, выставки) переводи на русский и СРАЗУ дублируй оригиналом
 в скобках, как в афише: «Снова, сегодня» (다시, 오늘); «Новогодний концерт-кроссовер»
 (서초문화원 송년음악회 [크로스오버 콘서트]).
@@ -922,6 +968,8 @@ def remember_event(st, title, venue, start, sig, mid=None, end="", sale="", city
 PROOF = """Ты — корректор русскоязычного Telegram-канала об афишах в Корее. Ниже готовый пост.
 Исправь в нём:
 - орфографию, грамматику, пунктуацию и опечатки («в Корию» → «в Корею», «мьюзикл» → «мюзикл»);
+- иностранные имена и названия, ошибочно переданные с корейского («конкурс имени Риза» → «конкурс
+  пианистов в Лидсе»), — запиши в принятой русской форме;
 - корейские слова и фрагменты в русском тексте — переведи на русский. Корейский оригинал оставь
   ТОЛЬКО в скобках после названия события и названия места. Даты — «21 января 2027», время — «19:30»,
   «평일» — будни, «주말» — выходные, цены — «132 000 вон», «스탠딩석» — стоячий партер, «지정석» —
