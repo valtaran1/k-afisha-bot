@@ -587,13 +587,25 @@ def kakao_lookup(venue, region_hint=None):
     cands = [d for d in docs if similar(d)]
     if region_hint:
         cands = [d for d in cands if region_hint in (d.get("road_address_name") or d.get("address_name") or "")]
-    addrs = {(d.get("road_address_name") or d.get("address_name") or "").strip() for d in cands}
-    addrs.discard("")
+
+    def addr_set(lst):
+        s = {(d.get("road_address_name") or d.get("address_name") or "").strip() for d in lst}
+        s.discard("")
+        return s
+
+    addrs = addr_set(cands)
+    if len(addrs) > 1:                         # несколько мест с таким названием — оставляем только культурные
+        only = [d for d in cands if d.get("category_group_code") == "CT1"
+                or culture.search(d.get("category_name", ""))]
+        if len(addr_set(only)) == 1:
+            cands, addrs = only, addr_set(only)
     if len(addrs) == 1:
         a = addrs.pop()
         log(f"  Kakao: «{venue}» → {a} (на карте: {cands[0].get('place_name')}, совп. {len(cands)})")
         return a
-    log(f"  Kakao: «{venue}» — однозначного совпадения нет (вариантов адреса: {len(addrs)})")
+    seen_v = "; ".join(f"{d.get('place_name')} [{d.get('category_name', '')[-20:]}] @ "
+                       f"{d.get('road_address_name') or d.get('address_name')}" for d in cands[:4])
+    log(f"  Kakao: «{venue}» — однозначного совпадения нет (вариантов адреса: {len(addrs)}) {seen_v}")
     return None
 
 
