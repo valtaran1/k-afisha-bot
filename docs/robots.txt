@@ -1,3 +1,3 @@
 User-agent: *
 Allow: /
-Sitemap: https://valtaran1.github.io/k-afisha-bot/sitemap.xml
+Sitemap: https://k-afisha.github.io/sitemap.xml
