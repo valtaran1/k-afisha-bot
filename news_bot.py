@@ -1557,7 +1557,8 @@ def run_seasonal(st):
 
 # ---------- сайт-зеркало (GitHub Pages, папка docs/) ----------
 SITE_DIR = "docs"
-SITE_URL = os.environ.get("SITE_URL", "https://valtaran1.github.io/k-afisha-bot").rstrip("/")
+SITE_URL = os.environ.get("SITE_URL", "https://k-afisha.github.io").rstrip("/")
+# сайт публикует отдельное хранилище k-afisha/k-afisha.github.io: каждые 30 минут забирает папку docs отсюда
 SITE_DATA = os.path.join(SITE_DIR, "events.json")
 CHANNEL_URL = f"https://t.me/{CHANNEL.lstrip('@')}"
 
