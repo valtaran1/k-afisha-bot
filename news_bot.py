@@ -558,14 +558,17 @@ def kakao_lookup(venue, region_hint=None):
     if not (KAKAO_REST_KEY and venue):
         return None
     base = venue_base(venue)
+    # здание = первое слово («블루스퀘어 신한카드홀» → «블루스퀘어»), если это не город/улица-район
+    words = squash(venue).split()
+    first = words[0] if len(words) > 1 and len(_norm(words[0])) >= 3 and not vague_place(words[0]) else ""
     docs = []
     try:
-        for q in dict.fromkeys([squash(venue), base]):
+        for q in dict.fromkeys([squash(venue), base] + ([first] if first else [])):
             docs += _kakao_search(q)
     except Exception as e:
         log("  Kakao: поиск не удался:", str(e)[:120])
         return None
-    nv, nb = _norm(venue), _norm(base)
+    nv, nb, nf = _norm(venue), _norm(base), _norm(first)
     culture = re.compile(r"문화|예술|공연|극장|아트|홀|컨벤션|전시|체육|경기장|대학|공원|센터")
 
     def similar(d):
@@ -574,6 +577,9 @@ def kakao_lookup(venue, region_hint=None):
             return False
         if name in (nv, nb) or (len(name) >= 4 and name in nv):
             return True
+        if nf and name == nf and (d.get("category_group_code") == "CT1"
+                                  or culture.search(d.get("category_name", ""))):
+            return True                          # само здание, в котором находится зал
         # то же здание под немного другим названием (3·15아트홀 ↔ 3·15아트센터) — только культурные места
         return (_prefix(name, nb) >= max(4, len(nb) - 2)
                 and (d.get("category_group_code") == "CT1" or culture.search(d.get("category_name", ""))))
