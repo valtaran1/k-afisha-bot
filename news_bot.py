@@ -1845,6 +1845,12 @@ def main():
         post_guide(st)
     elif MODE == "site":
         build_site(st)
+    elif MODE == "kakao":                       # проверка ключа Kakao: только поиск, без публикаций
+        log("Ключ Kakao " + ("подключён" if KAKAO_REST_KEY else "НЕ подключён"))
+        for v, city in (("3·15아트홀 대극장", "Чханвон"), ("세종문화회관 대극장", "Сеул"),
+                        ("예스24 라이브홀", "Сеул"), ("블루스퀘어 신한카드홀", "Сеул"),
+                        ("드림씨어터", "Пусан"), ("성신여대 운정그린캠퍼스 대강당", "Сеул")):
+            log(f"{v} ({city}) → {kakao_lookup(v, SIDO_RU.get(city))}")
     else:
         for name, fn in (("Пометка завершившихся", mark_finished), ("Напоминания о продажах", remind_sales),
                          ("Подборка недели", weekly_digest)):
