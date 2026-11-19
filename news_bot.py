@@ -1388,8 +1388,40 @@ def collect(st):
         it["norm"] = nt
         queue.append(it)
     queue.sort(key=lambda x: -x["score"])
+    queue = merge_same_news(queue)
     log(f"В очереди на проверку: {len(queue)}")
     return queue
+
+
+_QUOTE = "\"'‘’“”「」『』《》〈〉<>"
+_QUOTED_RE = re.compile(f"[{_QUOTE}]([^{_QUOTE}]{{2,40}})[{_QUOTE}]")
+
+
+def _letters(t):
+    return re.sub(r"[\W\d_]+", "", t).lower()
+
+
+def merge_same_news(queue):
+    """Несколько СМИ пишут об одном событии — ИИ проверяет его один раз.
+    Статьи считаются одинаковыми, если название в кавычках из одной (не короче 5 букв)
+    встречается в заголовке другой. Остальные статьи запоминаются в it["dups"]."""
+    kept = []
+    for it in queue:
+        if it["kind"] != "news":
+            kept.append(it)
+            continue
+        full = _letters(it["title"])
+        names = {n for n in (_letters(p) for p in _QUOTED_RE.findall(it["title"])) if len(n) >= 5}
+        it["_full"], it["_names"] = full, names
+        same = next((k for k in kept if k["kind"] == "news" and (
+            any(n in full for n in k["_names"]) or any(n in k["_full"] for n in names))), None)
+        if same:
+            same.setdefault("dups", []).append(it["key"])
+            same["_names"] |= names
+            log(f"  та же новость, что «{same['title'][:50]}»: {it['title'][:60]}")
+            continue
+        kept.append(it)
+    return kept
 
 
 def run_events(st):
@@ -1414,6 +1446,8 @@ def run_events(st):
             log("  ИИ недоступен, остановка до следующего запуска:", str(e)[:300])
             break
         st["done"][it["key"]] = now_kst().isoformat()
+        for k in it.get("dups", []):                 # другие статьи о том же событии
+            st["done"][k] = now_kst().isoformat()
         save_state(st)
         if data.get("skip"):
             log("  пропуск:", data.get("reason", ""))
@@ -1430,6 +1464,8 @@ def run_events(st):
         is_hot = data.get("priority") == "hot"
         if (is_hot and hot >= MAX_HOT_POSTS_PER_RUN) or (not is_hot and posted >= MAX_POSTS_PER_RUN):
             st["done"].pop(it["key"], None)          # опубликуем в следующий запуск
+            for k in it.get("dups", []):
+                st["done"].pop(k, None)
             save_state(st)
             log("  лимит постов на этот запуск исчерпан — опубликую в следующий")
             continue
