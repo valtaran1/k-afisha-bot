@@ -46,6 +46,7 @@ MAX_CHECKS_PER_RUN = 5       # сколько событий отдавать И
 HOT_SCORE = 75               # с какой оценки событие может быть «горячим» (много просмотров анонса и т.п.)
 PAUSE_BETWEEN_POSTS = int(os.environ.get("PAUSE_BETWEEN_POSTS", "60"))
 EXPO_DAYS_AHEAD = 45         # выставки публикуем, когда до начала ≤ 45 дней
+MIN_DAYS_LEFT = 1            # не публиковать, если до последнего дня события меньше стольких дней (1 = в последний день не постим)
 MARK_FINISHED_AFTER_DAYS = 1 # через сколько дней после последнего дня события пометить пост «завершилось»
 FINISHED_MARK = "❌ <b>Мероприятие завершилось</b>"
 GENERATE_IMAGES = False      # картинки только с официальных афиш; генерацию не используем
@@ -1417,6 +1418,15 @@ def run_events(st):
         if data.get("skip"):
             log("  пропуск:", data.get("reason", ""))
             continue
+        end_s = str(data.get("end_date", "")).strip()
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", end_s):
+            try:
+                days_left = (datetime.strptime(end_s, "%Y-%m-%d").date() - now_kst().date()).days
+            except ValueError:
+                days_left = None
+            if days_left is not None and days_left < MIN_DAYS_LEFT:
+                log(f"  событие заканчивается {end_s} — уже поздно публиковать, пропуск")
+                continue
         is_hot = data.get("priority") == "hot"
         if (is_hot and hot >= MAX_HOT_POSTS_PER_RUN) or (not is_hot and posted >= MAX_POSTS_PER_RUN):
             st["done"].pop(it["key"], None)          # опубликуем в следующий запуск
