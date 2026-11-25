@@ -42,6 +42,7 @@ USE_GOOGLE_SEARCH = True     # уточнять детали через поис
 MODE = os.environ.get("MODE", "events")      # events | seasonal
 MAX_POSTS_PER_RUN = 2        # обычных постов за запуск
 MAX_HOT_POSTS_PER_RUN = 4    # популярных (публикуются сверх обычного лимита)
+YES24_LIST_SIZE = 80         # сколько последних анонсов YES24 читать (свежих бывает мало, особенно в выходные)
 MAX_CHECKS_PER_RUN = 5       # сколько событий отдавать ИИ за запуск (бережём бесплатный лимит)
 HOT_SCORE = 75               # с какой оценки событие может быть «горячим» (много просмотров анонса и т.п.)
 PAUSE_BETWEEN_POSTS = int(os.environ.get("PAUSE_BETWEEN_POSTS", "60"))
@@ -233,12 +234,12 @@ def src_melon():
 
 def src_yes24():
     page = get_text("https://ticket.yes24.com/New/Notice/Ajax/axList.aspx",
-                    data={"page": "1", "size": "20", "genre": "", "province": "", "order": "1",
-                          "searchType": "All", "searchText": ""},
+                    data={"page": "1", "size": str(YES24_LIST_SIZE), "genre": "", "province": "",
+                          "order": "1", "searchType": "All", "searchText": ""},
                     headers={"Referer": "https://ticket.yes24.com/New/Notice/NoticeMain.aspx",
                              "X-Requested-With": "XMLHttpRequest"})
     items = []
-    for tr in re.findall(r"(?s)<tr>(.*?)</tr>", page):
+    for n, tr in enumerate(re.findall(r"(?s)<tr>(.*?)</tr>", page)):
         m = re.search(r'href="#id=(\d+)">(.*?)</a>', tr, re.S)
         if not m:
             continue
@@ -246,10 +247,12 @@ def src_yes24():
         title = strip_tags(re.sub(r"<span[^>]*>.*?</span>", "", m.group(2)))
         tds = re.findall(r"(?s)<td>(.*?)</td>", tr)
         views = int(re.sub(r"\D", "", strip_tags(tds[-1])) or 0) if tds else 0
+        score = 48 + 8 * math.log10(views + 1)
+        if n >= 20:     # старые анонсы: просмотры накопились за время, не считаем их «горячими»
+            score = min(score, 56)   # но выше большинства новостей: у анонсов есть официальная ссылка
         items.append({"key": f"yes24:{bid}", "source": "YES24 Ticket", "title": title,
                       "url": f"https://ticket.yes24.com/New/Notice/NoticeMain.aspx#id={bid}",
-                      "yes24_id": bid, "views": views, "kind": "ticket",
-                      "score": 48 + 8 * math.log10(views + 1)})
+                      "yes24_id": bid, "views": views, "kind": "ticket", "score": score})
     return items
 
 
@@ -846,6 +849,15 @@ K-pop группы и солисты с международным фандом�
 Иностранные имена и названия, записанные по-корейски, возвращай к их настоящей форме, а не
 транслитерируй корейское написание: 리즈 콩쿠르 — конкурс пианистов в Лидсе, 베를린 필하모닉 —
 Берлинский филармонический оркестр, 차이콥스키 — Чайковский.
+ВАЖНО: многие мюзиклы, спектакли и шоу в Корее — иностранные или о реальных иностранцах. В корейском
+нет звуков «т» в «th», «ф», «в», «з», поэтому побуквенная передача корейского даёт ошибки
+(아가사 → «Агаса» — НЕПРАВИЛЬНО, это Агата Кристи, Agatha). Порядок: 1) если в афише есть латинское
+написание (〈아가사 AGATHA〉) — переводи с него; 2) если имя или название похоже на иностранное —
+определи оригинал и пиши принятую русскую форму: 아가사 — Агата, 마틸다 — «Матильда»,
+지킬 앤 하이드 — «Джекилл и Хайд», 오페라의 유령 — «Призрак Оперы», 레미제라블 — «Отверженные»,
+엘리자벳 — «Элизабет», 프랑켄슈타인 — «Франкенштейн», 모차르트 — Моцарт, 반 고흐 — Ван Гог,
+셰익스피어 — Шекспир, 앨런 튜링 — Алан Тьюринг; 3) корейскую транслитерацию по Концевичу применяй
+ТОЛЬКО к корейским именам и словам.
 Название события (концерта, тура, выставки) переводи на русский и СРАЗУ дублируй оригиналом
 в скобках, как в афише: «Снова, сегодня» (다시, 오늘); «Новогодний концерт-кроссовер»
 (서초문화원 송년음악회 [크로스오버 콘서트]).
@@ -988,7 +1000,10 @@ PROOF = """Ты — корректор русскоязычного Telegram-к�
 Исправь в нём:
 - орфографию, грамматику, пунктуацию и опечатки («в Корию» → «в Корею», «мьюзикл» → «мюзикл»);
 - иностранные имена и названия, ошибочно переданные с корейского («конкурс имени Риза» → «конкурс
-  пианистов в Лидсе»), — запиши в принятой русской форме;
+  пианистов в Лидсе», «Агаса» → «Агата» (Агата Кристи, 아가사 AGATHA), «Матилда» → «Матильда»),
+  — запиши в принятой русской форме. Сверяйся с оригиналом в скобках: если там есть латиница
+  или узнаваемое иностранное имя, русское название должно ему соответствовать (Agatha — Агата,
+  а не Агаса; Turing — Тьюринг, а не Тюринг);
 - корейские слова и фрагменты в русском тексте — переведи на русский. Корейский оригинал оставь
   ТОЛЬКО в скобках после названия события и названия места. Даты — «21 января 2027», время — «19:30»,
   «평일» — будни, «주말» — выходные, цены — «132 000 вон», «스탠딩석» — стоячий партер, «지정석» —
@@ -1085,9 +1100,27 @@ def publish(text, photo, nav=None):
     if mid is None:
         mid = tg("sendMessage", {"chat_id": CHANNEL, "text": text, "parse_mode": "HTML",
                                  "disable_web_page_preview": "true"})
+    add_share_button(mid, text)
     if nav:
         tg("sendMessage", {"chat_id": CHANNEL, "text": nav, "parse_mode": "HTML"})
     return mid, is_caption, text
+
+
+SHARE_BUTTON = True    # кнопка «Поделиться с другом» под постом (при пометке «завершилось» она пропадает)
+
+
+def add_share_button(mid, text):
+    """Кнопка под постом: открывает выбор чата в Telegram с готовой ссылкой на этот пост."""
+    if not SHARE_BUTTON or not mid:
+        return
+    title = short_title(next((l for l in strip_tags(text).splitlines() if l.strip()), ""))
+    share = ("https://t.me/share/url?url=" + urllib.parse.quote(post_link(mid), safe="")
+             + "&text=" + urllib.parse.quote(f"{title} — событие в Корее, смотри!", safe=""))
+    try:
+        tg("editMessageReplyMarkup", {"chat_id": CHANNEL, "message_id": mid, "reply_markup": json.dumps(
+            {"inline_keyboard": [[{"text": "📤 Поделиться с другом", "url": share}]]}, ensure_ascii=False)})
+    except Exception as e:
+        log("  кнопка «Поделиться» не добавлена:", str(e)[:200])
 
 
 MONTHS = ["", "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа",
@@ -1216,6 +1249,71 @@ def weekly_digest(st):
         log(f"Подборка недели опубликована: событий {len(events)}, продаж {len(sales)}")
     except Exception as e:
         log("Подборка недели не отправлена:", str(e)[:200])
+
+
+REPORT_WEEKDAY, REPORT_HOUR = 6, 20    # отчёт владельцу: воскресенье после 20:00 KST
+
+
+def track_subscribers(st):
+    """Раз в день записывает число подписчиков канала."""
+    day = now_kst().date().isoformat()
+    subs = st.setdefault("subs", {})
+    if day in subs:
+        return
+    subs[day] = int(tg("getChatMemberCount", {"chat_id": CHANNEL}))
+    for d in sorted(subs)[:-120]:
+        subs.pop(d, None)
+    log(f"Подписчиков в канале: {subs[day]}")
+
+
+def owner_id():
+    admins = tg("getChatAdministrators", {"chat_id": CHANNEL}) or []
+    return next((a["user"]["id"] for a in admins if a.get("status") == "creator"), None)
+
+
+def weekly_report(st, force=False):
+    """Раз в неделю — короткий отчёт владельцу канала личным сообщением.
+    Бот может написать человеку, только если тот хоть раз нажал «Start» в чате с ботом."""
+    now = now_kst()
+    week = now.strftime("%G-W%V")
+    if not force and (now.weekday() != REPORT_WEEKDAY or now.hour < REPORT_HOUR
+                      or st.get("report_last") == week):
+        return
+    if not force:
+        st["report_last"] = week
+    subs = st.get("subs", {})
+    days = sorted(subs)
+    if not days:
+        return
+    cur = subs[days[-1]]
+    week_ago = (now - timedelta(days=7)).date().isoformat()
+    base_day = max([d for d in days if d <= week_ago], default=days[0])
+    diff = cur - subs[base_day]
+    since = (now - timedelta(days=7)).isoformat()
+    posts = [r for r in st.get("recent", []) if r.get("mid") and str(r.get("at", "")) >= since]
+    cities = {}
+    for r in posts:
+        if r.get("city"):
+            cities[r["city"]] = cities.get(r["city"], 0) + 1
+    upcoming_sales = [r for r in st.get("recent", []) if (parse_dt(r.get("sale", "")) or now) > now]
+    text = (f"📊 <b>Отчёт К-Афиши за неделю</b>\n\n"
+            f"👥 Подписчиков: <b>{cur}</b> ({'+' if diff >= 0 else ''}{diff} с {base_day[8:10]}.{base_day[5:7]})\n"
+            f"📝 Опубликовано событий: <b>{len(posts)}</b>\n")
+    if cities:
+        text += "🏙 По городам: " + ", ".join(f"{c} {n}" for c, n in
+                                             sorted(cities.items(), key=lambda x: -x[1])) + "\n"
+    text += f"🎟 Впереди открытий продаж: {len(upcoming_sales)}\n"
+    if not posts:
+        text += "\n⚠️ За неделю не было ни одного поста — стоит проверить бота.\n"
+    uid = owner_id()
+    if not uid:
+        log("Отчёт: не нашёл владельца канала")
+        return
+    try:
+        tg("sendMessage", {"chat_id": uid, "text": text, "parse_mode": "HTML"})
+        log("Отчёт владельцу отправлен")
+    except Exception as e:
+        log("Отчёт не отправлен (владелец должен один раз нажать Start в чате с ботом):", str(e)[:150])
 
 
 GUIDE_FILE = "guide.txt"
@@ -1808,6 +1906,10 @@ def event_page(ev, today):
         label = "Адрес для навигатора" if ev.get("is_addr") else "Место (найдите в Naver/Kakao Map)"
         body += f"<div class=\"addr\">🧭 {label}:<br><code>{e(ev['place'])}</code></div>"
     body += (f"<p><a class=\"cta\" href=\"{CHANNEL_URL}/{ev['mid']}\">Открыть пост в Telegram</a></p>"
+             "<div class=\"addr\">🔔 <b>Не пропускайте новые события в Корее.</b> Концерты, мюзиклы и выставки "
+             "на русском, напоминания об открытии продаж — в Telegram-канале "
+             f"<a href=\"{CHANNEL_URL}\">{e(CHANNEL)}</a>.<br><br>"
+             f"<a class=\"cta\" href=\"{CHANNEL_URL}\">Подписаться бесплатно</a></div>"
              f"<p><a href=\"{SITE_URL}/\">← Все события</a></p>")
     ld = {"@context": "https://schema.org", "@type": "Event", "name": title,
           "description": desc, "url": url,
@@ -1893,7 +1995,57 @@ def build_site(st):
     write_if_changed(os.path.join(SITE_DIR, "robots.txt"),
                      f"User-agent: *\nAllow: /\nSitemap: {SITE_URL}/sitemap.xml\n")
     write_if_changed(os.path.join(SITE_DIR, ".nojekyll"), "")
+    write_if_changed(os.path.join(SITE_DIR, f"{INDEXNOW_KEY}.txt"), INDEXNOW_KEY)
     log(f"Сайт обновлён: событий {len(events)} (ближайших {len(upcoming)})")
+    try:
+        indexnow_ping(st, urls)
+    except Exception as e:
+        log("IndexNow: не удалось:", str(e)[:200])
+
+
+# IndexNow: сообщаем Яндексу, Bing и др. о новых страницах сайта (ключ публичный — это не секрет)
+INDEXNOW_KEY = "089eba0a4ff94d3e80ed2c2a0461908a"
+INDEXNOW_MAX_PER_RUN = 20
+
+
+def _site_live(url):
+    try:
+        http(url, timeout=15, max_bytes=200_000)
+        return True
+    except Exception:
+        return False
+
+
+def indexnow_ping(st, urls):
+    """Страница появляется на сайте через 30–60 мин после поста (сайт публикуется отдельно),
+    поэтому отправляем только те адреса, которые уже открываются."""
+    sent = st.setdefault("indexnow_sent", [])
+    new = [u for u in urls if u not in sent][:INDEXNOW_MAX_PER_RUN]
+    if not new:
+        return
+    key_url = f"{SITE_URL}/{INDEXNOW_KEY}.txt"
+    if not _site_live(key_url):
+        log("IndexNow: файл ключа ещё не опубликован на сайте — отправлю позже")
+        return
+    live = [u for u in new if _site_live(u)]
+    if not live:
+        return
+    payload = {"host": urllib.parse.urlparse(SITE_URL).netloc, "key": INDEXNOW_KEY,
+               "keyLocation": key_url, "urlList": live}
+    req = urllib.request.Request("https://api.indexnow.org/indexnow",
+                                 data=json.dumps(payload).encode(),
+                                 headers={"Content-Type": "application/json; charset=utf-8"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            code = r.status
+    except urllib.error.HTTPError as e:
+        code = e.code
+    if code in (200, 202):
+        sent.extend(live)
+        del sent[:-2000]
+        log(f"IndexNow: отправлено страниц: {len(live)}")
+    else:
+        log(f"IndexNow: ответ {code} — повторю в следующий запуск")
 
 
 def main():
@@ -1909,6 +2061,9 @@ def main():
         post_guide(st)
     elif MODE == "site":
         build_site(st)
+    elif MODE == "report":                      # проверка отчёта владельцу: отправить сейчас
+        track_subscribers(st)
+        weekly_report(st, force=True)
     elif MODE == "kakao":                       # проверка ключа Kakao: только поиск, без публикаций
         log("Ключ Kakao " + ("подключён" if KAKAO_REST_KEY else "НЕ подключён"))
         for v, city in (("3·15아트홀 대극장", "Чханвон"), ("세종문화회관 대극장", "Сеул"),
@@ -1917,7 +2072,8 @@ def main():
             log(f"{v} ({city}) → {kakao_lookup(v, SIDO_RU.get(city))}")
     else:
         for name, fn in (("Пометка завершившихся", mark_finished), ("Напоминания о продажах", remind_sales),
-                         ("Подборка недели", weekly_digest)):
+                         ("Подборка недели", weekly_digest), ("Подписчики", track_subscribers),
+                         ("Отчёт владельцу", weekly_report)):
             try:
                 fn(st)
             except Exception as e:
