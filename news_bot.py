@@ -922,6 +922,11 @@ def make_post(it, text, links):
               + f"\nИсточник: {it['source']}\nЗаголовок: {it['title']}\n"
               + f"Ссылки:\n{link_list}\n\nМатериал:\n{text[:6500] or '(текста нет — только заголовок)'}\n\n"
               + recent_block(_ST)
+              + (f"Похоже на гастроли уже опубликованного события «{it['tour_of'].get('t', '')}» "
+                 f"({it['tour_of'].get('v', '')}, {it['tour_of'].get('s', '')}). Если это ТОТ ЖЕ спектакль "
+                 "или концерт (тот же артист/труппа/постановка) в другом городе или зале, НЕ ставь skip "
+                 "из-за этого, а добавь в JSON поле \"same_tour\": true; если это другое событие с похожим "
+                 "названием — \"same_tour\": false.\n\n" if it.get("tour_of") else "")
               + ANSWER_FORMAT)
     out, sources = gemini(prompt, search=use_search)
     data = parse_json(out)
@@ -988,11 +993,149 @@ def bootstrap_recent(st):
     st["recent"] = rec
 
 
-def remember_event(st, title, venue, start, sig, mid=None, end="", sale="", city=""):
+def remember_event(st, title, venue, start, sig, mid=None, end="", sale="", city="", tk=""):
     rec = st.setdefault("recent", [])
     rec.append({"t": title[:80], "v": str(venue or "")[:60], "s": str(start or ""), "sig": sig,
-                "at": now_kst().isoformat(), "mid": mid, "e": end, "sale": sale, "city": city})
+                "at": now_kst().isoformat(), "mid": mid, "e": end, "sale": sale, "city": city, "tk": tk})
     del rec[:-300]
+
+
+# ---------- гастроли: один спектакль/артист в разных городах — один пост ----------
+TOUR_MERGE = True            # новые города гастролей дописывать в уже опубликованный пост
+TOUR_DAYS = 120              # искать первый пост гастролей среди опубликованных за столько дней
+_TOUR_STOP = {"tour", "투어", "전국투어", "in", "앵콜", "encore", "seoul", "busan", "daegu", "incheon", "gwangju",
+              "daejeon", "ulsan", "sejong", "suwon", "goyang", "ilsan", "seongnam", "changwon", "cheongju",
+              "jeonju", "cheonan", "pohang", "gimhae", "jeju", "gangneung", "chuncheon", "wonju", "gyeongju",
+              "andong", "yeosu", "suncheon", "mokpo", "gumi", "jinju", "anyang", "ansan", "bucheon", "yongin"}
+
+
+def tour_key(title):
+    """Название без города и чисел: «2026 크리스마스 특별공연 [대학로 로코 연극 어바웃타임] – 울산» →
+    «크리스마스특별공연대학로로코연극어바웃타임». Пустая строка, если название слишком общее."""
+    words = re.findall(r"[가-힣]+|[A-Za-z]+", strip_tags(title or ""))
+    keep = []
+    for w in words:
+        lw = w.lower()
+        if lw in _TOUR_STOP:
+            continue
+        base = re.sub(r"(?:시|공연|편|투어)$", "", w)
+        if w in CITIES_KO or (base != w and base in CITIES_KO):
+            continue
+        keep.append(lw)
+    key = "".join(keep)
+    return key if len(key) >= 6 else ""
+
+
+def find_tour(st, it):
+    """Уже опубликованный (и ещё не завершившийся) пост тех же гастролей, если есть."""
+    tk = tour_key(it.get("title", ""))
+    if not TOUR_MERGE or not tk:
+        return None
+    cutoff = now_kst() - timedelta(days=TOUR_DAYS)
+    for rec in reversed(st.get("recent", [])):
+        if not rec.get("mid") or str(rec["mid"]) not in st.get("posted", {}):
+            continue
+        if "tk" not in rec:      # посты до 26.11.2026: берём корейский оригинал из первой строки поста
+            first = next((l for l in strip_tags(st["posted"][str(rec["mid"])].get("text", "")).splitlines()
+                          if l.strip()), "")
+            ko = re.findall(r"\(([^()]*[가-힣][^()]*)\)", first)
+            rec["tk"] = tour_key(ko[-1]) if ko else ""
+        if rec["tk"] != tk:
+            continue
+        at = parse_dt(rec.get("at", ""))
+        if at and at.replace(tzinfo=None) >= cutoff.replace(tzinfo=None):
+            return rec
+    return None
+
+
+def day_range(start, end):
+    s, e = _d(start), _d(end)
+    if s and e and e > s:
+        if (s.year, s.month) == (e.year, e.month):
+            return f"{s.day}–{e.day} {MONTHS[e.month]}"
+        return f"{s.day} {MONTHS[s.month]} – {e.day} {MONTHS[e.month]}"
+    x = s or e
+    return f"{x.day} {MONTHS[x.month]}" if x else ""
+
+
+TOUR_HEAD = "🗺 <b>Гастроли — также в других городах:</b>"
+
+
+def tour_text(base, lines, extra_tags):
+    """Текст поста + блок городов гастролей перед строкой хэштегов (и черты, если она в посте)."""
+    body, tail = base.rstrip(), []
+    while True:
+        head, _, last = body.rpartition("\n")
+        if last.strip() == SEPARATOR or (last.strip().startswith("#")
+                                         and not any(t.startswith("#") for t in tail)):
+            tail.insert(0, last.strip())
+            body = head.rstrip()
+            continue
+        break
+    tags = [t for t in tail if t.startswith("#")]
+    if tags:
+        have = set(tags[0].split())
+        tags[0] = " ".join(tags[0].split() + [t for t in extra_tags if t not in have])
+        tail = [tags[0] if t.startswith("#") else t for t in tail]
+    elif extra_tags:
+        tail.insert(0, " ".join(extra_tags))
+    return body + "\n\n" + TOUR_HEAD + "\n" + "\n".join(lines) + "".join("\n\n" + t for t in tail)
+
+
+def tg_len(text):
+    """Длина так, как её считает Telegram: без HTML-разметки, в единицах UTF-16 (эмодзи = 2)."""
+    return len(html.unescape(re.sub(r"<[^>]+>", "", text)).encode("utf-16-le")) // 2
+
+
+def merge_tour(st, rec, data, link, target):
+    """Дописывает новый город гастролей в уже опубликованный пост. True — получилось."""
+    mid = str(rec["mid"])
+    p = st["posted"].get(mid)
+    if not p:
+        return False
+    city = str(data.get("city_ru", "")).strip()
+    when = day_range(data.get("start_date"), data.get("end_date"))
+    if not city or not when:
+        return False
+    a = f'<a href="{html.escape(link, quote=True)}">билеты</a>'
+    full = f"📍 {html.escape(city)}, {when}: {html.escape(target)} · {a}"
+    short = f"📍 {html.escape(city)}, {when} · {a}"
+    base = p.get("base") or p["text"]
+    lines = list(p.get("tour", []))
+    tag = "#" + re.sub(r"[\s\-]+", "", city)
+    tags = list(p.get("tour_tags", [])) + ([tag] if tag not in p.get("tour_tags", []) else [])
+    limit = (1024 if p.get("caption") else 4096) - 40   # запас под пометку «завершилось»
+    new_text = None
+    for line in (full, short):
+        cand = tour_text(base, lines + [line], tags)
+        if tg_len(cand) <= limit:
+            new_text, lines = cand, lines + [line]
+            break
+    if new_text is None:
+        return False
+    if p.get("caption"):
+        tg("editMessageCaption", {"chat_id": CHANNEL, "message_id": mid, "caption": new_text,
+                                  "parse_mode": "HTML"})
+    else:
+        tg("editMessageText", {"chat_id": CHANNEL, "message_id": mid, "text": new_text,
+                               "parse_mode": "HTML", "disable_web_page_preview": "true"})
+    add_share_button(int(mid), new_text)      # правка подписи убирает кнопку — возвращаем
+    end = str(data.get("end_date") or data.get("start_date") or "").strip()
+    p.update({"base": base, "tour": lines, "tour_tags": tags, "text": new_text})
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", end) and end > p.get("end", ""):
+        p["end"] = end                        # «завершилось» — после последнего города
+        rec["e"] = end
+    try:
+        events = site_load()
+        for ev in events:
+            if str(ev.get("mid")) == mid:
+                ev["text"] = new_text
+                if re.fullmatch(r"\d{4}-\d{2}-\d{2}", end) and end > str(ev.get("end", "")):
+                    ev["end"] = end
+        site_save(events)
+    except Exception as e:
+        log("  сайт: гастроли не сохранены:", str(e)[:200])
+    return True
 
 
 # ---------- корректура ----------
@@ -1549,6 +1692,9 @@ def run_events(st):
             log("  подробности не получены:", str(e)[:200])
             text, img_url, links = "", it.get("image"), ([it["url"]] if it["kind"] != "news" else [])
         checked += 1
+        it["tour_of"] = find_tour(st, it)
+        if it["tour_of"]:
+            log(f"  похоже на гастроли поста {it['tour_of']['mid']} «{it['tour_of'].get('t', '')[:50]}»")
         try:
             data, extra = make_post(it, text, links)
         except Exception as e:
@@ -1613,6 +1759,23 @@ def run_events(st):
             log("  место проведения не подтверждено официальным источником — пропуск")
             continue
         log(f"  навигатор: {'адрес' if is_addr else 'название места'} «{target}»")
+        if it.get("tour_of") and data.get("same_tour") in (True, "true"):
+            try:
+                merged = merge_tour(st, it["tour_of"], data, link, target)
+            except Exception as e:
+                merged = False
+                log("  не удалось дописать город в пост гастролей:", str(e)[:200])
+            if merged:
+                if ekey:
+                    st["events"][ekey] = now_kst().isoformat()
+                st["events"][it["norm"]] = now_kst().isoformat()
+                remember_event(st, it["tour_of"].get("t", ""), data.get("venue_ko", ""),
+                               data.get("start_date", ""), sig, end=str(data.get("end_date", "")).strip(),
+                               city=str(data.get("city_ru", "")).strip())
+                save_state(st)
+                log(f"  ✅ город добавлен в пост гастролей {it['tour_of']['mid']}")
+                continue
+            log("  в пост гастролей не поместилось — публикую отдельным постом")
         # официальная афиша обязательна: без неё не публикуем
         if it["kind"] in ("news", "seasonal"):
             img_url = None                       # фото из СМИ не берём — только официальная афиша
@@ -1661,7 +1824,7 @@ def run_events(st):
         title = next((l.strip() for l in strip_tags(post).splitlines() if l.strip()), it["title"])
         remember_event(st, title, data.get("venue_ko", ""), data.get("start_date", ""), sig,
                        mid=mid, end=end_date, sale=str(data.get("sale_open", "")).strip(),
-                       city=str(data.get("city_ru", "")).strip())
+                       city=str(data.get("city_ru", "")).strip(), tk=tour_key(it["title"]))
         try:
             site_add({"mid": mid, "title": title, "text": sent_text, "start": data.get("start_date", ""),
                       "end": end_date, "city": str(data.get("city_ru", "")).strip(), "place": target,
