@@ -1086,17 +1086,28 @@ def publish(text, photo, nav=None):
     if not nav and nav is not False:
         text = text + "\n\n" + SEPARATOR   # адреса нет — черта в конце самого поста
     # запас 40 символов — чтобы потом влезла пометка «Мероприятие завершилось» (лимит подписи 1024)
-    if photo and len(text) <= 1024 - 40:
-        try:
-            mid = tg("sendPhoto", {"chat_id": CHANNEL, "caption": text, "parse_mode": "HTML"}, photo)
-            is_caption = True
-        except Exception as e:
-            log("  фото с подписью не ушло:", str(e)[:200])
-    elif photo:
-        try:
-            tg("sendPhoto", {"chat_id": CHANNEL}, photo)
-        except Exception as e:
-            log("  фото не ушло:", str(e)[:200])
+    if photo:
+        # без афиши пост не публикуем: если Telegram не принял картинку (например IMAGE_PROCESS_FAILED),
+        # пробуем ещё раз, а потом отменяем весь пост — текст без афиши не отправляется
+        with_caption = len(text) <= 1024 - 40
+        fields = {"chat_id": CHANNEL}
+        if with_caption:
+            fields.update({"caption": text, "parse_mode": "HTML"})
+        err = None
+        for attempt in range(2):
+            try:
+                pid = tg("sendPhoto", fields, photo)
+                err = None
+                break
+            except Exception as e:
+                err = e
+                log("  афиша не ушла:", str(e)[:200])
+                if attempt == 0:
+                    time.sleep(5)
+        if err is not None:
+            raise RuntimeError("Telegram не принял афишу — пост не опубликован")
+        if with_caption:
+            mid, is_caption = pid, True
     if mid is None:
         mid = tg("sendMessage", {"chat_id": CHANNEL, "text": text, "parse_mode": "HTML",
                                  "disable_web_page_preview": "true"})
